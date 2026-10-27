@@ -147,6 +147,24 @@ class Analyzer:
             label = f"{label} (після останнього патча ще мало матчів)"
         return start, label, row, m
 
+    def _ingame_entries(self, hero_id: int, start: int) -> list[dict]:
+        """Популярні збірки, оновлені після патча, + популярні загалом."""
+        out, seen = [], set()
+        lists = []
+        try:
+            lists.append(self.c.builds(hero_id, since=start))
+        except (ApiError, TypeError):
+            pass
+        lists.append(self.c.builds(hero_id))
+        for lst in lists:
+            for e in lst if isinstance(lst, list) else []:
+                hb = e.get("hero_build", e) if isinstance(e, dict) else {}
+                bid = hb.get("hero_build_id")
+                if bid not in seen:
+                    seen.add(bid)
+                    out.append(e)
+        return out
+
     def _bulk_rows(self, hero_id: int, start: int, badge: int | None) -> list[dict]:
         key = (start, badge)
         with self._bulk_lock:
@@ -175,7 +193,7 @@ class Analyzer:
             else:
                 f_items = ex.submit(self.c.item_stats, hero_id, start, badge)
                 f_abil = ex.submit(self.c.ability_order, hero_id, start, badge)
-            f_builds = ex.submit(self.c.builds, hero_id)
+            f_builds = ex.submit(self._ingame_entries, hero_id, start)
             rows = f_items.result()
         buy_min = {int(r["item_id"]): float(r["avg_buy_time_s"]) / 60
                    for r in rows if r.get("item_id") is not None and r.get("avg_buy_time_s") is not None}
@@ -399,8 +417,6 @@ def match_ingame_builds(b: Build, entries, top: int = 3) -> list[dict]:
         # Збірки, не оновлені після патча, могли не адаптувати під зміни:
         # дуже старі відкидаємо, решту трохи штрафуємо.
         stale_days = (b.start_ts - int(p["updated"])) / 86400 if p["updated"] else 0
-        if stale_days > 150:
-            continue
         p["outdated"] = stale_days > 0
         got = sum(w for iid, w in want.items() if iid in p["items"])
         core_total = sum(1 for w in want.values() if w == 1.0)
@@ -410,7 +426,8 @@ def match_ingame_builds(b: Build, entries, top: int = 3) -> list[dict]:
         p["score"] = (p["match"] - 0.004 * max(0, len(p["items"]) - 30)
                       + 0.02 * math.log10(1 + p["favorites"])
                       - (0.08 if p["outdated"] else 0))
-        out.append(p)
+        if p["match"] >= 0.3:
+            out.append(p)
     out.sort(key=lambda p: p["score"], reverse=True)
     for p in out:
         p.pop("items", None)

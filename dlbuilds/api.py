@@ -222,10 +222,11 @@ class Client:
             "min_unix_timestamp": min_ts, "min_average_badge": min_badge,
             "game_mode": "normal", "bucket": "hero"})
 
-    def builds(self, hero_id: int) -> list[dict]:
-        """Опубліковані в ігровому браузері збірки героя (останні версії)."""
+    def builds(self, hero_id: int, since: int | None = None) -> list[dict]:
+        """Опубліковані в ігровому браузері збірки героя (останні версії).
+        since — лише оновлені після цього моменту (наприклад, після патча)."""
         url = f"{API}/v1/builds"
-        base = {"hero_id": hero_id, "only_latest": "true", "limit": 100}
+        base = {"hero_id": hero_id, "only_latest": "true", "limit": 100, "min_unix_timestamp": since}
         last: ApiError | None = None
         for sort in ("weekly_favorites", "favorites", None):
             try:
