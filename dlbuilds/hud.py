@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPainterPath
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QLayout, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from .analysis import PHASES, Build, ItemRec
 
@@ -42,7 +42,14 @@ def next_items(b: Build | None, bought: set[int], elapsed_min: float | None,
     return order[:n], "початок збірки"
 
 
+ROWS = 4
+WIDTH, HEIGHT = 270, 200
+
+
 class Hud(QWidget):
+    """Фіксований розмір і фіксовані рядки: вікно ніколи не змінює розмір,
+    тому не «стрибає». Прив'язане правим нижнім кутом до кута екрана."""
+
     def __init__(self, icons, margins=(24, 230)):
         super().__init__(None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
                          | Qt.WindowTransparentForInput | Qt.WindowDoesNotAcceptFocus)
@@ -50,15 +57,41 @@ class Hud(QWidget):
         self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.icons = icons
         self.margins = margins
+        self._sig = None
+        self.setFixedSize(WIDTH, HEIGHT)
         self.setStyleSheet("QWidget { color:#ece6da; font-family:'Segoe UI'; font-size:12px; }"
                            "QLabel#t { color:#d6b26a; font-size:10px; font-weight:700; letter-spacing:1px; }"
-                           "QLabel#m { color:#9a9286; font-size:10px; }")
-        self.lay = QVBoxLayout(self)
-        self.lay.setContentsMargins(12, 9, 12, 10)
-        self.lay.setSpacing(4)
-        # Вікно завжди рівно під розмір вмісту; кожна зміна розміру → resizeEvent → place().
-        self.lay.setSizeConstraint(QLayout.SetFixedSize)
-        self.setMinimumWidth(250)
+                           "QLabel#m { color:#9a9286; font-size:10px; }"
+                           "QLabel#n { font-weight:600; }"
+                           "QLabel#c { color:#7fd1c4; font-weight:700; }")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(12, 9, 12, 10)
+        lay.setSpacing(4)
+        lay.addStretch(1)                        # порожнє місце — зверху, вміст притиснутий донизу
+        self.title = QLabel()
+        self.title.setObjectName("t")
+        lay.addWidget(self.title)
+        self.rows = []
+        for _ in range(ROWS):
+            w = QWidget()
+            w.setFixedHeight(30)
+            row = QHBoxLayout(w)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(8)
+            ic = QLabel()
+            ic.setFixedSize(28, 28)
+            name = QLabel()
+            name.setObjectName("n")
+            cost = QLabel()
+            cost.setObjectName("c")
+            row.addWidget(ic)
+            row.addWidget(name, 1)
+            row.addWidget(cost)
+            lay.addWidget(w)
+            self.rows.append((w, ic, name, cost))
+        self.footer = QLabel()
+        self.footer.setObjectName("m")
+        lay.addWidget(self.footer)
 
     def paintEvent(self, _e):
         p = QPainter(self)
@@ -69,69 +102,39 @@ class Hud(QWidget):
         p.setPen(QColor(214, 178, 106, 80))
         p.drawPath(path)
 
-    def _clear(self):
-        while self.lay.count():
-            item = self.lay.takeAt(0)
-            w = item.widget()
-            if w:
-                w.hide()
-                w.setParent(None)
-                w.deleteLater()
-            elif item.layout():
-                lay = item.layout()
-                while lay.count():
-                    sub = lay.takeAt(0).widget()
-                    if sub:
-                        sub.hide()
-                        sub.setParent(None)
-                        sub.deleteLater()
-
     def update_items(self, hero: str, items: list[ItemRec], how: str):
-        self._clear()
-        t = QLabel(f"ДАЛІ КУПИТИ · {hero.upper()}")
-        t.setObjectName("t")
-        self.lay.addWidget(t)
-        if not items:
-            m = QLabel("Усі предмети збірки куплено 👍")
-            m.setObjectName("m")
-            self.lay.addWidget(m)
-        for r in items:
-            row = QHBoxLayout()
-            row.setSpacing(8)
-            ic = QLabel()
-            ic.setFixedSize(28, 28)
-            ic.setStyleSheet(f"background:{SLOT_BG.get(r.slot, '#221e1a')}; "
-                             f"border:1px solid {SLOT_COLORS.get(r.slot, '#3d3730')}; border-radius:5px;")
-            self.icons.set_icon(ic, r.image, 24, 3)
-            row.addWidget(ic)
-            name = QLabel(r.name)
-            name.setStyleSheet("font-weight:600;")
-            row.addWidget(name, 1)
-            cost = QLabel(f"{r.cost:,}".replace(",", " "))
-            cost.setStyleSheet("color:#7fd1c4; font-weight:700;")
-            row.addWidget(cost)
-            self.lay.addLayout(row)
+        sig = (hero, tuple(r.item_id for r in items), how)
+        if sig == self._sig:
+            self.place()
+            return                                # нічого не змінилось — не перемальовуємо
+        self._sig = sig
+        self.title.setText(f"ДАЛІ КУПИТИ · {hero.upper()}")
+        for i, (w, ic, name, cost) in enumerate(self.rows):
+            if i < len(items):
+                r = items[i]
+                ic.setStyleSheet(f"background:{SLOT_BG.get(r.slot, '#221e1a')}; "
+                                 f"border:1px solid {SLOT_COLORS.get(r.slot, '#3d3730')}; border-radius:5px;")
+                self.icons.set_icon(ic, r.image, 24, 3)
+                name.setText(r.name)
+                cost.setText(f"{r.cost:,}".replace(",", " "))
+                w.show()
+            else:
+                w.hide()
         if items:
             total = sum(r.cost for r in items)
-            m = QLabel(f"Разом {total:,} душ · {how}".replace(",", " "))
-            m.setObjectName("m")
-            self.lay.addWidget(m)
-        self.ensurePolished()
-        self.lay.activate()
+            self.footer.setText(f"Разом {total:,} душ · {how}".replace(",", " "))
+        else:
+            self.footer.setText("Усі предмети збірки куплено")
         self.place()
 
     def place(self):
-        """Прив'язка правого нижнього кута вікна до кута екрана."""
+        """Правий нижній кут вікна = кут екрана мінус відступи."""
         scr = QGuiApplication.primaryScreen().geometry()
         right, bottom = self.margins
-        x = scr.right() - self.width() - right
-        y = scr.bottom() - self.height() - bottom
-        if self.pos().x() != x or self.pos().y() != y:
+        x = scr.x() + scr.width() - WIDTH - right
+        y = scr.y() + scr.height() - HEIGHT - bottom
+        if self.x() != x or self.y() != y:
             self.move(x, y)
-
-    def resizeEvent(self, e):
-        super().resizeEvent(e)
-        self.place()
 
     def showEvent(self, e):
         super().showEvent(e)
