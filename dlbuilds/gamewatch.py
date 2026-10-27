@@ -172,15 +172,77 @@ def find_game_dir(override: str | None = None) -> Path | None:
     return None
 
 
+def _win_process_names() -> set[str]:
+    """Імена запущених процесів через Toolhelp32 (без запуску tasklist)."""
+    import ctypes
+    from ctypes import wintypes as wt
+
+    class PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [("dwSize", wt.DWORD), ("cntUsage", wt.DWORD), ("th32ProcessID", wt.DWORD),
+                    ("th32DefaultHeapID", ctypes.c_void_p), ("th32ModuleID", wt.DWORD),
+                    ("cntThreads", wt.DWORD), ("th32ParentProcessID", wt.DWORD),
+                    ("pcPriClassBase", ctypes.c_long), ("dwFlags", wt.DWORD),
+                    ("szExeFile", ctypes.c_wchar * 260)]
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateToolhelp32Snapshot.restype = wt.HANDLE
+    k32.CreateToolhelp32Snapshot.argtypes = [wt.DWORD, wt.DWORD]
+    k32.Process32FirstW.argtypes = [wt.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+    k32.Process32NextW.argtypes = [wt.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+    k32.CloseHandle.argtypes = [wt.HANDLE]
+    snap = k32.CreateToolhelp32Snapshot(0x2, 0)          # TH32CS_SNAPPROCESS
+    if not snap or snap == wt.HANDLE(-1).value:
+        return set()
+    names = set()
+    try:
+        e = PROCESSENTRY32W()
+        e.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+        ok = k32.Process32FirstW(snap, ctypes.byref(e))
+        while ok:
+            names.add(e.szExeFile.lower())
+            ok = k32.Process32NextW(snap, ctypes.byref(e))
+    finally:
+        k32.CloseHandle(snap)
+    return names
+
+
 def game_running() -> bool:
     if sys.platform != "win32":
         return False
     try:
-        out = subprocess.run(["tasklist", "/NH", "/FO", "CSV"], capture_output=True, text=True,
-                             timeout=5, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout.lower()
-    except (OSError, subprocess.SubprocessError):
+        names = _win_process_names()
+    except OSError:
         return False
-    return any(f'"{n}"' in out for n in PROCESS_NAMES)
+    return any(n in names for n in PROCESS_NAMES)
+
+
+def read_shared(path: Path, offset: int, size: int) -> bytes:
+    """Читання з повним спільним доступом (FILE_SHARE_READ|WRITE|DELETE),
+    щоб гра могла писати, перейменовувати й видаляти лог, поки ми читаємо."""
+    if sys.platform != "win32":
+        with open(path, "rb") as f:
+            f.seek(offset)
+            return f.read(size)
+    import ctypes
+    from ctypes import wintypes as wt
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateFileW.restype = wt.HANDLE
+    k32.CreateFileW.argtypes = [wt.LPCWSTR, wt.DWORD, wt.DWORD, ctypes.c_void_p, wt.DWORD, wt.DWORD, wt.HANDLE]
+    k32.SetFilePointerEx.argtypes = [wt.HANDLE, ctypes.c_longlong, ctypes.c_void_p, wt.DWORD]
+    k32.ReadFile.argtypes = [wt.HANDLE, ctypes.c_void_p, wt.DWORD, ctypes.POINTER(wt.DWORD), ctypes.c_void_p]
+    k32.CloseHandle.argtypes = [wt.HANDLE]
+    h = k32.CreateFileW(str(path), 0x80000000, 0x7, None, 3, 0x80, None)   # GENERIC_READ, share all, OPEN_EXISTING
+    if not h or h == wt.HANDLE(-1).value:
+        raise OSError(ctypes.get_last_error(), "CreateFileW")
+    try:
+        k32.SetFilePointerEx(h, offset, None, 0)
+        buf = ctypes.create_string_buffer(size)
+        got = wt.DWORD(0)
+        if not k32.ReadFile(h, buf, size, ctypes.byref(got), None):
+            raise OSError(ctypes.get_last_error(), "ReadFile")
+        return buf.raw[:got.value]
+    finally:
+        k32.CloseHandle(h)
 
 
 def launch_with_condebug() -> bool:
@@ -207,7 +269,7 @@ class GameWatcher(threading.Thread):
             | 'match' | 'spectating'
     """
 
-    def __init__(self, on_change, game_dir: str | None = None, poll: float = 1.0):
+    def __init__(self, on_change, game_dir: str | None = None, poll: float = 2.0):
         super().__init__(daemon=True)
         self.on_change = on_change
         self.override = game_dir
@@ -239,10 +301,8 @@ class GameWatcher(threading.Thread):
             self.parser = LogParser()
         if size == self._pos:
             return False
-        with open(path, "rb") as f:
-            f.seek(self._pos)
-            data = f.read(size - self._pos)
-        self._pos = size
+        data = read_shared(path, self._pos, min(size - self._pos, 4_000_000))
+        self._pos += len(data)
         text = data.decode("utf-8", errors="replace")
         lines = text.splitlines()
         if resync and self._pos > 0 and lines:

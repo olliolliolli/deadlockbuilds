@@ -1036,7 +1036,7 @@ def _app_icon() -> QIcon:
     return icon
 
 
-def _setup_tray(app, w: "Overlay", cfg: dict):
+def _setup_tray(app, w: "Overlay", cfg: dict, set_watch=None):
     icon = _app_icon()
     app.setWindowIcon(icon)
     if not QSystemTrayIcon.isSystemTrayAvailable():
@@ -1051,6 +1051,11 @@ def _setup_tray(app, w: "Overlay", cfg: dict):
     w.act_hud.setCheckable(True)
     w.act_hud.setChecked(bool(cfg.get("hud_enabled", True)))
     w.act_hud.triggered.connect(lambda *_: w.toggle_clickthrough())
+    if set_watch:
+        act = menu.addAction("Читати лог гри (автовизначення)")
+        act.setCheckable(True)
+        act.setChecked(bool(cfg.get("read_game_log", True)))
+        act.toggled.connect(set_watch)
     menu.addSeparator()
     menu.addAction("Закрити програму", w.quit_app)
     tray.setContextMenu(menu)
@@ -1093,11 +1098,26 @@ def main():
     }, on_error=bridge.hk_error.emit)
     hk.start()
     app.aboutToQuit.connect(hk.stop)
-    app.aboutToQuit.connect(lambda: watcher.stop())
+    app.aboutToQuit.connect(lambda: watcher and watcher.stop())
     bridge.game.connect(w.on_game)
-    watcher = GameWatcher(bridge.game.emit, cfg.get("game_dir") or None)
-    watcher.start()
-    _setup_tray(app, w, cfg)
+    watcher = None
+
+    def set_watch(on: bool):
+        """Тумблер «Читати лог гри»: повністю вмикає/вимикає взаємодію з грою."""
+        nonlocal watcher
+        cfg["read_game_log"] = on
+        cfgmod.save(cfg)
+        if on and watcher is None:
+            watcher = GameWatcher(bridge.game.emit, cfg.get("game_dir") or None)
+            watcher.start()
+        elif not on and watcher is not None:
+            watcher.stop()
+            watcher = None
+            w.on_game("not_running", None)
+            w.status_text.setText("Читання логу гри вимкнене (трей → «Читати лог гри»)")
+
+    set_watch(cfg.get("read_game_log", True))
+    _setup_tray(app, w, cfg, set_watch)
     w.show()
     app.aboutToQuit.connect(w.hud.close)
     code = app.exec()
