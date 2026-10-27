@@ -191,7 +191,7 @@ class IconCache(QObject):
 class HotkeyBridge(QObject):
     toggle = Signal()
     clickthrough = Signal()
-    game = Signal(str, object)     # (status, hero_key) з потоку GameWatcher
+    game = Signal(str, object, object)   # (status, hero_key, info) з потоку GameWatcher
     hk_error = Signal(list)
 
 
@@ -310,6 +310,7 @@ class Overlay(QWidget):
         self.server = server if server and server.enabled else None
         self.bought: set[int] = set()
         self.match_started: float | None = None
+        self._match_key: str | None = None
         self.disp = Dispatcher()
         self.icons = IconCache(cfgmod.app_dir() / "icons", self.disp)
         self.hud = Hud(self.icons, tuple(cfg.get("hud_offset") or (20, 20)),
@@ -517,11 +518,21 @@ class Overlay(QWidget):
             winfocus.activate(prev)
 
     # ------------------------------------------------------------ game detection
-    def on_game(self, status: str, hero_key):
-        if status == "match" and self._game_status != "match":
-            self.match_started = time.time()     # новий матч — скидаємо позначки
-            self.bought.clear()
-        elif status != "match":
+    def on_game(self, status: str, hero_key, info=None):
+        if info is None:                          # повторний виклик — та сама інформація про матч
+            info = getattr(self, "_game_info", {}) if status == "match" else {}
+        self._game_info = info
+        if status == "match":
+            # Час і номер матчу — з логу гри, тож після перезапуску програми
+            # посеред матчу вони ті самі, а позначки куплених відновлюються.
+            start = info.get("match_start") or self.match_started or time.time()
+            key = info.get("match_id") or (f"t{int(start // 60)}" if info.get("match_start") else None)
+            if key != self._match_key:
+                self._match_key = key
+                saved = self.cfg.get("bought") or {}
+                self.bought = set(saved.get("items") or []) if key and saved.get("match") == key else set()
+            self.match_started = start
+        else:
             self.match_started = None
         self._game_status, self._game_hero = status, hero_key
         QTimer.singleShot(0, self.update_hud)
@@ -628,7 +639,13 @@ class Overlay(QWidget):
 
     def _toggle_bought(self, item_id: int, on: bool):
         (self.bought.add if on else self.bought.discard)(item_id)
+        self._save_bought()
         self.update_hud()
+
+    def _save_bought(self):
+        if self._match_key:
+            self.cfg["bought"] = {"match": self._match_key, "items": sorted(self.bought)}
+            cfgmod.save(self.cfg)
 
     # ------------------------------------------------------------ in-game build
     def _active_ingame(self) -> dict | None:
@@ -745,7 +762,7 @@ class Overlay(QWidget):
             return
         badge = RANKS[self.rank_box.currentIndex()][1]
         style = (self.cfg.get("styles") or {}).get(str(hero_id), "damage")   # типово — дамаг
-        if self.cfg.get("hero_id") != hero_id:
+        if self.cfg.get("hero_id") != hero_id and self._game_status != "match":
             self.bought.clear()
         self.cfg["hero_id"] = hero_id
         self.cfg["rank_index"] = self.rank_box.currentIndex()

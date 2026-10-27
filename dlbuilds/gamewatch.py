@@ -14,6 +14,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 
 APP_ID = "1422450"
@@ -27,7 +28,7 @@ P = {k: re.compile(v, re.IGNORECASE) for k, v in {
     "map_info": r"\[Client\] Map:\s+\"([^\"]+)\"",
     "map_physics": r"\[Client\] Created physics for\s+([^\s]+)",
     "host_activate": r"\[HostStateManager\] Host activate:.*\(([^)]+)\)",
-    "lobby_created": r"Lobby\s+\d+\s+for\s+Match\s+\d+\s+created",
+    "lobby_created": r"Lobby\s+\d+\s+for\s+Match\s+(\d+)\s+created",
     "lobby_destroyed": r"Lobby\s+\d+\s+for\s+Match\s+\d+\s+destroyed",
     "server_connect": r"\[Client\] CL:\s+Connected to '([^']+)'",
     "server_disconnect": r"\[Client\] Disconnecting from server:\s+(\S+)",
@@ -46,6 +47,25 @@ def normalize_hero_key(raw: str) -> str:
     return s
 
 
+_TS = re.compile(r"^(\d\d)/(\d\d) (\d\d):(\d\d):(\d\d)")
+
+
+def _line_time(line: str) -> float | None:
+    """Рядки логу починаються з часу: «10/27 19:16:14 …» (без року)."""
+    m = _TS.match(line)
+    if not m:
+        return None
+    mo, d, hh, mm, ss = map(int, m.groups())
+    now = datetime.now()
+    try:
+        dt = datetime(now.year, mo, d, hh, mm, ss)
+    except ValueError:
+        return None
+    if dt.timestamp() > time.time() + 86400:      # рядок з минулого року (31.12 → 01.01)
+        dt = dt.replace(year=now.year - 1)
+    return dt.timestamp()
+
+
 class LogParser:
     """Невеликий автомат станів: меню / хованка / матч / глядач."""
 
@@ -53,11 +73,16 @@ class LogParser:
         self.phase = "menu"
         self.hero: str | None = None
         self.window_open = True      # у матчі приймаємо лише перший сигнал героя
+        self.line_ts: float | None = None      # час поточного рядка логу
+        self.match_start: float | None = None  # коли почався поточний матч (за логом)
+        self.match_id: str | None = None
 
-    def _new_match(self):
+    def _new_match(self, match_id: str | None = None):
         self.phase = "match"
         self.hero = None
         self.window_open = True
+        self.match_start = self.line_ts or time.time()
+        self.match_id = match_id
 
     def _map(self, name: str):
         name = name.lower().strip()
@@ -85,6 +110,9 @@ class LogParser:
     def feed(self, line: str) -> bool:
         """Повертає True, якщо змінився герой або фаза."""
         before = (self.hero, self.phase)
+        ts = _line_time(line)
+        if ts:
+            self.line_ts = ts
         if m := P["loaded_hero"].search(line):
             self._hero(m.group(1))
         elif m := P["hero_vmdl"].search(line):
@@ -92,8 +120,8 @@ class LogParser:
         elif m := (P["map_info"].search(line) or P["map_physics"].search(line)
                    or P["host_activate"].search(line)):
             self._map(m.group(1))
-        elif P["lobby_created"].search(line):
-            self._new_match()
+        elif m := P["lobby_created"].search(line):
+            self._new_match(m.group(1))
         elif m := P["server_connect"].search(line):
             if "loopback" not in m.group(1).lower() and self.phase != "match":
                 self._new_match()
@@ -285,11 +313,13 @@ class GameWatcher(threading.Thread):
         self._stop.set()
 
     def _emit(self, status: str):
-        key = (status, self.parser.hero)
+        pr = self.parser
+        info = {"match_start": pr.match_start, "match_id": pr.match_id} if status == "match" else {}
+        key = (status, pr.hero, pr.match_id, pr.match_start)
         if key != getattr(self, "_last", None):
             self._last = key
             self.status = status
-            self.on_change(status, self.parser.hero)
+            self.on_change(status, pr.hero, info)
 
     def _read_new(self, path: Path, resync: bool) -> bool:
         size = path.stat().st_size
