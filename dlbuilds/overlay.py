@@ -29,7 +29,7 @@ from .analysis import PHASES, RANKS, SLOT_NAMES, STYLE_NAMES, Analyzer, Build, I
 from .api import Client, force_ipv4
 from .gamewatch import (GameWatcher, close_other_instances, game_running, launch_with_condebug,
                         normalize_hero_key)
-from . import winfocus
+from . import steamcfg, winfocus
 from .hotkeys import HotkeyListener, pretty
 from .hud import Hud, next_items
 from .serverdata import ServerData, app_version, default_url
@@ -396,6 +396,7 @@ class Overlay(QWidget):
         st.addWidget(self.auto_btn)
         root.addWidget(self.status_box)
         self._game_status, self._game_hero = None, None
+        self._autodetect_cfg = None        # чи прописано -condebug у Steam (None — невідомо)
         self._hero_by_key: dict[str, int] = {}
 
         # --- body
@@ -432,6 +433,7 @@ class Overlay(QWidget):
             # Список героїв із кешу — миттєво; потім оновлюємо з мережі.
             self._run(self.offline.heroes, self._heroes_loaded, quiet=True)
         self._run(self.an.heroes, self._heroes_loaded)
+        self._check_autodetect_cfg()
 
     # ------------------------------------------------------------ painting / dragging
     def paintEvent(self, _e):
@@ -522,9 +524,12 @@ class Overlay(QWidget):
         name = self.hero_box.itemText(self.hero_box.findData(hero_id)) if hero_id else None
         texts = {
             "no_game_dir": ("#6f685f", "Не знайшов папку Deadlock у Steam", None),
-            "not_running": ("#6f685f", "Гра не запущена", "Запустити гру"),
-            "no_condebug": ("#e0b25a", "Щоб визначати героя, гру треба запустити з -condebug",
-                            "Перезапустити"),
+            "not_running": (("#6f685f", "Гра не запущена", "Запустити гру")
+                            if self._autodetect_cfg is not False else
+                            ("#e0b25a", "Автовизначення героя вимкнене", "Увімкнути")),
+            "no_condebug": (("#e0b25a", "Автовизначення вимкнене. Закрий гру й натисни «Увімкнути»",
+                             "Увімкнути") if self._autodetect_cfg is not True else
+                            ("#e0b25a", "Гру запущено до налаштування — перезапусти її", None)),
             "menu": ("#9a9286", "У меню" + (f" · останній герой: {name}" if name else ""), None),
             "hideout": ("#7fb3d1", f"У хованці · {name}" if name else "У хованці", None),
             "match": ("#7fd17f", f"У матчі · граєш за {name}" if name else "У матчі · обираєш героя…", None),
@@ -555,14 +560,37 @@ class Overlay(QWidget):
             self.on_game(self._game_status, self._game_hero)
 
     def _launch_game(self):
-        if self._game_status == "no_condebug":
-            self.status_text.setText("Закрий гру — програма перезапустить її з -condebug, "
-                                     "або додай -condebug у параметри запуску в Steam.")
-            if game_running():
-                return
+        if self.status_btn.text() == "Увімкнути":
+            self._enable_autodetect()
+            return
         if launch_with_condebug():
             self.status_text.setText("Запускаю Deadlock з автовизначенням героя…")
             self.status_btn.hide()
+
+    def _check_autodetect_cfg(self):
+        def done(v):
+            self._autodetect_cfg = v
+            if self._game_status:
+                self.on_game(self._game_status, self._game_hero)
+        self._run(steamcfg.is_enabled, done, quiet=True)
+
+    def _enable_autodetect(self):
+        """Один раз додає -condebug у параметри запуску Deadlock у Steam."""
+        self.status_btn.setEnabled(False)
+
+        def progress(msg):
+            self.disp.call.emit(lambda: self.status_text.setText(msg))
+
+        def done(res):
+            ok, msg = res
+            self.status_btn.setEnabled(True)
+            if ok:
+                self._autodetect_cfg = True
+                self.status_btn.hide()
+            self.status_text.setText(msg)
+            self.status_dot.setStyleSheet(f"color:{'#7fd17f' if ok else '#e08a7a'}; font-size:10px;")
+
+        self._run(steamcfg.enable, done, progress)
 
     def toggle_clickthrough(self):
         """Ctrl+Shift+X — увімкнути/вимкнути підказку в правому нижньому куті."""
