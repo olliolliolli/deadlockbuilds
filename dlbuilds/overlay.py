@@ -678,7 +678,9 @@ class Overlay(QWidget):
         lay.addWidget(_label(best["name"], "itemName", wrap=True))
         upd = ""
         if best.get("updated"):
-            upd = f" · оновлена {datetime.fromtimestamp(int(best['updated'])):%d.%m}"
+            upd = f" · оновлена {datetime.fromtimestamp(int(best['updated'])):%d.%m.%y}"
+            if best.get("outdated"):
+                upd += " (до патча)"
         lay.addWidget(_label(
             f"Збіг {best['match'] * 100:.0f}% · {best['core_got']}/{best['core_total']} основних предметів"
             f" · ★ {best['favorites']}{upd}", "muted", wrap=True))

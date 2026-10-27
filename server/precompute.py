@@ -27,7 +27,7 @@ def main(out_dir: str) -> int:
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     cache = Path(tempfile.mkdtemp(prefix="dlb-cache-"))
-    an = Analyzer(Client(cache, ttl=3600, verbose=True))
+    an = Analyzer(Client(cache, ttl=3600, verbose=False))
 
     heroes = an.heroes()
     an.items()           # прогріваємо довідники до запуску потоків
@@ -35,18 +35,32 @@ def main(out_dir: str) -> int:
     jobs = [(int(h["id"]), ri) for h in heroes for ri in range(len(RANKS))]
     print(f"{len(heroes)} героїв × {len(RANKS)} рангів = {len(jobs)} збірок")
 
-    builds, errors = {}, []
-    with ThreadPoolExecutor(6) as ex:
-        futs = {ex.submit(an.build, hid, RANKS[ri][1]): (hid, ri) for hid, ri in jobs}
-        for f in as_completed(futs):
-            hid, ri = futs[f]
-            try:
-                builds[f"{hid}:{ri}"] = build_to_dict(f.result())
-            except Exception as e:  # noqa: BLE001
-                errors.append(f"{hid}:{ri} {type(e).__name__}: {e}")
+    builds, errors = {}, {}
 
-    for e in errors[:20]:
-        print("ERR", e)
+    def run(batch, workers):
+        with ThreadPoolExecutor(workers) as ex:
+            futs = {ex.submit(an.build, hid, RANKS[ri][1]): (hid, ri) for hid, ri in batch}
+            for f in as_completed(futs):
+                hid, ri = futs[f]
+                try:
+                    builds[f"{hid}:{ri}"] = build_to_dict(f.result())
+                    errors.pop(f"{hid}:{ri}", None)
+                except Exception as e:  # noqa: BLE001
+                    errors[f"{hid}:{ri}"] = f"{type(e).__name__}: {e}"[:300]
+
+    run(jobs, 3)
+    # Друге й третє коло для тих, що впали (ліміт запитів, тайм-аути).
+    for attempt in (1, 2):
+        failed = [(int(k.split(":")[0]), int(k.split(":")[1])) for k in errors]
+        if not failed:
+            break
+        print(f"Повтор {attempt}: {len(failed)} збірок")
+        time.sleep(20 * attempt)
+        run(failed, 1)
+
+    errors = list(errors.items())
+    for k, e in errors[:20]:
+        print("ERR", k, e)
     if len(builds) < len(jobs) * 0.5:
         print(f"Забагато помилок ({len(errors)}/{len(jobs)}) — старі дані не перезаписую")
         return 1
@@ -58,6 +72,7 @@ def main(out_dir: str) -> int:
         "heroes": [{"id": int(h["id"]), "name": h.get("name"), "class_name": h.get("class_name"),
                     "image": hero_image(h)} for h in heroes],
         "builds": builds,
+        "errors": dict(errors[:50]),
     }
     path = out / "builds.json"
     path.write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")), "utf-8")
