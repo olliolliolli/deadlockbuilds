@@ -18,7 +18,7 @@ import sys
 import threading
 
 MOD_VK = {"ctrl": 0x11, "shift": 0x10, "alt": 0x12}
-POLL_SEC = 0.025
+POLL_SEC = 0.033
 
 
 def parse(combo: str) -> tuple[frozenset[str], int] | None:
@@ -76,10 +76,18 @@ class HotkeyListener(threading.Thread):
         user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
         user32.GetAsyncKeyState.restype = ctypes.c_short
 
-        watch = set(MOD_VK.values()) | {vk for _, vk, _ in self.combos}
+        main_keys = sorted({vk for _, vk, _ in self.combos})
+        mod_keys = list(MOD_VK.values())
         was_down = [False] * len(self.combos)
+        gaks = user32.GetAsyncKeyState
         while not self._stop.wait(POLL_SEC):
-            pressed = {vk for vk in watch if user32.GetAsyncKeyState(vk) & 0x8000}
+            # Зазвичай це 1 виклик за тік: модифікатори питаємо, лише коли основна клавіша натиснута.
+            pressed = {vk for vk in main_keys if gaks(vk) & 0x8000}
+            if not pressed:
+                if any(was_down):
+                    was_down = [False] * len(self.combos)
+                continue
+            pressed |= {vk for vk in mod_keys if gaks(vk) & 0x8000}
             for i, (mods, vk, cb) in enumerate(self.combos):
                 down = matches(pressed, mods, vk)
                 if down and not was_down[i]:          # лише в момент натискання

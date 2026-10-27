@@ -327,7 +327,9 @@ class GameWatcher(threading.Thread):
                     log = game / LOG_SUFFIX
 
                 now = time.time()
-                if now - self._last_proc_check > 5:
+                # Поки гра працює, список процесів переглядаємо рідко; поки не працює — частіше,
+                # щоб швидко помітити запуск.
+                if now - self._last_proc_check > (15 if self._running else 5):
                     was = self._running
                     self._running = game_running()
                     self._last_proc_check = now

@@ -315,7 +315,7 @@ class Overlay(QWidget):
         self.hud = Hud(self.icons, tuple(cfg.get("hud_margins") or (24, 230)))
         self.hud_timer = QTimer(self)
         self.hud_timer.timeout.connect(self.update_hud)
-        self.hud_timer.start(15_000)
+        self.hud_timer.start(30_000)
         self.clickthrough = False
         self._drag: QPoint | None = None
         self._req = 0
@@ -1073,8 +1073,29 @@ def _setup_tray(app, w: "Overlay", cfg: dict, set_watch=None):
     w._tray, w._tray_menu = tray, menu                  # тримаємо посилання
 
 
+def _lower_priority():
+    """Програма поступається грі процесором: пріоритет «нижче звичайного»
+    та режим енергоефективності Windows (EcoQoS)."""
+    if sys.platform != "win32":
+        return
+    import ctypes
+    from ctypes import wintypes as wt
+    k32 = ctypes.WinDLL("kernel32")
+    proc = k32.GetCurrentProcess()
+    k32.SetPriorityClass(proc, 0x4000)                    # BELOW_NORMAL_PRIORITY_CLASS
+
+    class PPTS(ctypes.Structure):
+        _fields_ = [("Version", wt.ULONG), ("ControlMask", wt.ULONG), ("StateMask", wt.ULONG)]
+    st = PPTS(1, 1, 1)                                     # EXECUTION_SPEED throttling on
+    try:
+        k32.SetProcessInformation(proc, 4, ctypes.byref(st), ctypes.sizeof(st))
+    except (AttributeError, OSError):
+        pass
+
+
 def main():
     _install_crash_log()
+    _lower_priority()
     if close_other_instances():
         time.sleep(0.5)          # стара копія звільняє ресурси
     cfg = cfgmod.load()
