@@ -1,0 +1,44 @@
+name: Build exe
+
+on:
+  push:
+    branches: [main, master]
+    paths: ["dlbuilds/**", "app.py", ".github/workflows/build-exe.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  exe:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install pyinstaller PySide6-Essentials requests
+
+      - name: Embed the data URL of this repository
+        shell: bash
+        run: |
+          echo "DATA_URL = \"https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/data/builds.json\"" > dlbuilds/_build_info.py
+
+      - name: Build DeadlockBuilds.exe
+        run: >
+          pyinstaller --noconfirm --onefile --windowed --name DeadlockBuilds
+          --exclude-module tkinter --exclude-module unittest
+          app.py
+
+      - name: Publish release "latest"
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest dist/DeadlockBuilds.exe \
+            --title "DeadlockBuilds" \
+            --notes "Автоматична збірка від $(date -u +%Y-%m-%d). Завантаж DeadlockBuilds.exe нижче."
