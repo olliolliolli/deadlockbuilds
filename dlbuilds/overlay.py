@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import hashlib
+from concurrent.futures import ThreadPoolExecutor
 import re
 import threading
 import sys
@@ -15,7 +16,7 @@ from datetime import datetime
 from pathlib import Path
 
 import requests
-from PySide6.QtCore import QObject, QPoint, QRunnable, QSize, Qt, QThreadPool, QTimer, Signal, Slot
+from PySide6.QtCore import QObject, QPoint, QSize, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QColor, QFont, QIcon, QImage, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import (QApplication, QComboBox, QFrame, QGridLayout, QHBoxLayout,
                                QLabel, QPushButton, QScrollArea, QSizeGrip, QVBoxLayout, QWidget)
@@ -70,37 +71,51 @@ QFrame#row:hover {{ background: rgba(255,255,255,0.05); }}
 
 
 # ---------------------------------------------------------------- background jobs
-class _Signals(QObject):
-    done = Signal(object)
-    failed = Signal(str)
+class Dispatcher(QObject):
+    """Живе в GUI-потоці весь час роботи програми. Фонові потоки передають
+    сюди функції, і вони виконуються в GUI-потоці.
 
+    Раніше кожне завдання мало власний QRunnable з сигналами. Python знищував
+    його, поки Qt ще доставляв результат, і це давало «access violation»."""
+    call = Signal(object)
 
-class _Job(QRunnable):
-    def __init__(self, fn, *args):
+    def __init__(self):
         super().__init__()
-        self.fn, self.args, self.sig = fn, args, _Signals()
+        self.call.connect(self._run, Qt.QueuedConnection)
+        self.pool = ThreadPoolExecutor(max_workers=6, thread_name_prefix="dlb")
 
-    @Slot()
-    def run(self):
+    @Slot(object)
+    def _run(self, fn):
         try:
-            self.sig.done.emit(self.fn(*self.args))
-        except Exception as e:  # noqa: BLE001 — показуємо будь-яку помилку в оверлеї
+            fn()
+        except Exception:  # noqa: BLE001
             traceback.print_exc()
-            self.sig.failed.emit(str(e))
+
+    def submit(self, fn, ok, fail=None, *args):
+        def task():
+            try:
+                res = fn(*args)
+            except Exception as e:  # noqa: BLE001
+                traceback.print_exc()
+                if fail:
+                    msg = str(e)
+                    self.call.emit(lambda: fail(msg))
+                return
+            self.call.emit(lambda: ok(res))
+        self.pool.submit(task)
 
 
 class IconCache(QObject):
-    """Завантажує іконки у фоні та кешує їх на диску."""
-    loaded = Signal(str, QImage)
+    """Завантажує іконки у фоні та кешує їх на диску. Картинка (QImage)
+    створюється лише в GUI-потоці з байтів, отриманих фоновим потоком."""
 
-    def __init__(self, cache_dir: Path, pool: QThreadPool):
+    def __init__(self, cache_dir: Path, dispatcher: Dispatcher):
         super().__init__()
         self.dir = Path(cache_dir)
         self.dir.mkdir(parents=True, exist_ok=True)
-        self.pool = pool
+        self.d = dispatcher
         self.mem: dict[str, QPixmap] = {}
         self.waiting: dict[str, list] = {}
-        self.loaded.connect(self._on_loaded)
 
     def _path(self, url: str) -> Path:
         return self.dir / (hashlib.sha1(url.encode()).hexdigest() + Path(url).suffix[:5])
@@ -123,25 +138,28 @@ class IconCache(QObject):
         path = self._path(url)
 
         def fetch():
-            if not path.exists():
-                r = requests.get(url, timeout=20)
-                r.raise_for_status()
-                path.write_bytes(r.content)
-            return QImage(str(path))
+            if path.exists():
+                return path.read_bytes()
+            r = requests.get(url, timeout=20)
+            r.raise_for_status()
+            path.write_bytes(r.content)
+            return r.content
 
-        job = _Job(fetch)
-        job.sig.done.connect(lambda img, u=url: self.loaded.emit(u, img))
-        job.sig.failed.connect(lambda _m, u=url: self.waiting.pop(u, None))
-        self.pool.start(job)
+        self.d.submit(fetch, lambda data, u=url: self._on_loaded(u, data),
+                      lambda _m, u=url: self.waiting.pop(u, None))
 
-    def _on_loaded(self, url: str, img: QImage):
+    def _on_loaded(self, url: str, data: bytes):
+        img = QImage.fromData(data)
         if img.isNull():
             self.waiting.pop(url, None)
             return
         pm = QPixmap.fromImage(img)
         self.mem[url] = pm
         for cb in self.waiting.pop(url, []):
-            cb(pm)
+            try:
+                cb(pm)
+            except RuntimeError:   # віджет уже видалено
+                pass
 
     @staticmethod
     def _apply(label: QLabel, pm: QPixmap):
@@ -253,9 +271,8 @@ class Overlay(QWidget):
         self.an, self.cfg = analyzer, cfg
         self.offline = offline
         self.server = server if server and server.enabled else None
-        self.pool = QThreadPool.globalInstance()
-        self.pool.setMaxThreadCount(max(8, self.pool.maxThreadCount()))
-        self.icons = IconCache(cfgmod.app_dir() / "icons", self.pool)
+        self.disp = Dispatcher()
+        self.icons = IconCache(cfgmod.app_dir() / "icons", self.disp)
         self.clickthrough = False
         self._drag: QPoint | None = None
         self._req = 0
@@ -468,11 +485,7 @@ class Overlay(QWidget):
 
     # ------------------------------------------------------------ data
     def _run(self, fn, ok, *args, quiet: bool = False):
-        job = _Job(fn, *args)
-        job.sig.done.connect(ok)
-        if not quiet:
-            job.sig.failed.connect(self._failed)
-        self.pool.start(job)
+        self.disp.submit(fn, ok, None if quiet else self._failed, *args)
 
     def _failed(self, msg):
         self.hero_sub.setText(f"Помилка: {msg}")
