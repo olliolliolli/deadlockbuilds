@@ -71,7 +71,7 @@ class Hud(QWidget):
     def __init__(self, icons, margins=(24, 230)):
         super().__init__(None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
                          | Qt.WindowTransparentForInput | Qt.WindowDoesNotAcceptFocus)
-        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_OpaquePaintEvent)       # непрозоре — не знижує FPS гри
         self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.icons = icons
         self.margins = margins
@@ -113,12 +113,9 @@ class Hud(QWidget):
 
     def paintEvent(self, _e):
         p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        path = QPainterPath()
-        path.addRoundedRect(self.rect().adjusted(1, 1, -1, -1), 10, 10)
-        p.fillPath(path, QColor(16, 14, 12, 200))
-        p.setPen(QColor(214, 178, 106, 80))
-        p.drawPath(path)
+        p.fillRect(self.rect(), QColor(18, 16, 14))
+        p.setPen(QColor(90, 76, 52))
+        p.drawRect(self.rect().adjusted(0, 0, -1, -1))
 
     def update_items(self, hero: str, items: list[ItemRec], how: str):
         sig = (hero, tuple(r.item_id for r in items), how)

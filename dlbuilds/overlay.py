@@ -321,10 +321,11 @@ class Overlay(QWidget):
         self._req = 0
         self.build_data: Build | None = None
 
-        self.setAttribute(Qt.WA_TranslucentBackground)
+        # Непрозоре вікно: напівпрозорі вікна поверх гри змушують Windows змішувати
+        # їх з кожним кадром гри й помітно знижують FPS.
+        self.setAttribute(Qt.WA_OpaquePaintEvent)
         self.setWindowTitle("Deadlock Builds")
         self.setStyleSheet(STYLE)
-        self.setWindowOpacity(float(cfg["opacity"]))
         self.move(*cfg["pos"])
         self.resize(*cfg["size"])
         self.setMinimumSize(330, 420)
@@ -443,13 +444,10 @@ class Overlay(QWidget):
     # ------------------------------------------------------------ painting / dragging
     def paintEvent(self, _e):
         p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        path = QPainterPath()
-        path.addRoundedRect(self.rect().adjusted(1, 1, -1, -1), 12, 12)
-        p.fillPath(path, QColor(18, 16, 14, 232))
-        p.setPen(QColor(214, 178, 106, 90))
-        p.drawPath(path)
-        p.fillRect(14, 1, self.width() - 28, 2, QColor(214, 178, 106, 140))
+        p.fillRect(self.rect(), QColor(20, 18, 16))
+        p.setPen(QColor(90, 76, 52))
+        p.drawRect(self.rect().adjusted(0, 0, -1, -1))
+        p.fillRect(0, 0, self.width(), 2, QColor(214, 178, 106))
 
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton and e.position().y() < 70:
@@ -483,7 +481,7 @@ class Overlay(QWidget):
         - показаний, але активна гра → забрати курсор (оверлей стає активним);
         - показаний і активний → сховати й повернути курсор у гру."""
         hwnd = int(self.winId())
-        if self.isVisible() and winfocus.foreground() == hwnd:
+        if self.isVisible() and (winfocus.foreground() == hwnd or not self.cfg.get("take_focus", True)):
             self.hide()                    # назад у гру: лишається підказка в куті
             self._return_focus()
             self.update_hud()
@@ -492,7 +490,8 @@ class Overlay(QWidget):
             self.show()
         self.hud.hide()
         self.raise_()
-        self._take_focus()
+        if self.cfg.get("take_focus", True):
+            self._take_focus()
 
     def show_full(self):
         """Показати вікно зі збірками (з трея)."""
@@ -1051,6 +1050,15 @@ def _setup_tray(app, w: "Overlay", cfg: dict, set_watch=None):
     w.act_hud.setCheckable(True)
     w.act_hud.setChecked(bool(cfg.get("hud_enabled", True)))
     w.act_hud.triggered.connect(lambda *_: w.toggle_clickthrough())
+    focus = menu.addAction("Забирати курсор у гри (Ctrl+X)")
+    focus.setCheckable(True)
+    focus.setChecked(bool(cfg.get("take_focus", True)))
+    focus.setToolTip("Без цього FPS гри не падає, але курсор у вікні треба діставати самому")
+
+    def _focus(on):
+        cfg["take_focus"] = on
+        cfgmod.save(cfg)
+    focus.toggled.connect(_focus)
     if set_watch:
         act = menu.addAction("Читати лог гри (автовизначення)")
         act.setCheckable(True)
