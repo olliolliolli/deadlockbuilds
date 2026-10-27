@@ -25,6 +25,7 @@ from . import config as cfgmod
 from .analysis import PHASES, RANKS, SLOT_NAMES, Analyzer, Build, ItemRec
 from .api import Client, force_ipv4
 from .gamewatch import GameWatcher, game_running, launch_with_condebug, normalize_hero_key
+from . import winfocus
 from .hotkeys import HotkeyListener, pretty
 from .serverdata import ServerData, default_url
 
@@ -370,7 +371,7 @@ class Overlay(QWidget):
 
         # --- footer
         foot = QHBoxLayout()
-        self.footer = _label(f"{pretty(cfg['hotkey_toggle'])} — сховати · "
+        self.footer = _label(f"{pretty(cfg['hotkey_toggle'])} — курсор / сховати · "
                              f"{pretty(cfg['hotkey_clickthrough'])} — крізь клік", "muted")
         foot.addWidget(self.footer)
         foot.addStretch()
@@ -422,11 +423,34 @@ class Overlay(QWidget):
 
     # ------------------------------------------------------------ hotkeys
     def toggle_visible(self):
-        if self.isVisible():
+        """Ctrl+X:
+        - оверлей схований → показати й забрати курсор у гри;
+        - показаний, але активна гра → забрати курсор (оверлей стає активним);
+        - показаний і активний → сховати й повернути курсор у гру."""
+        hwnd = int(self.winId())
+        if self.isVisible() and (winfocus.foreground() == hwnd or self.clickthrough):
             self.hide()
-        else:
+            self._return_focus()
+            return
+        if not self.isVisible():
             self.show()
-            self.raise_()
+        self.raise_()
+        if not self.clickthrough:
+            self._take_focus()
+
+    def _take_focus(self):
+        hwnd = int(self.winId())
+        fg = winfocus.foreground()
+        if fg and fg != hwnd:
+            self._prev_fg = fg            # куди повернути фокус (гра)
+        winfocus.activate(hwnd)
+        self.activateWindow()
+        winfocus.release_cursor(hwnd)
+
+    def _return_focus(self):
+        prev = getattr(self, "_prev_fg", 0)
+        if prev and winfocus.is_window(prev):
+            winfocus.activate(prev)
 
     # ------------------------------------------------------------ game detection
     def on_game(self, status: str, hero_key):
@@ -482,6 +506,10 @@ class Overlay(QWidget):
         self.setWindowFlag(Qt.WindowTransparentForInput, self.clickthrough)
         self.setWindowOpacity(float(self.cfg["opacity"]) * (0.8 if self.clickthrough else 1))
         self.show()
+        if self.clickthrough:
+            self._return_focus()          # миша знову в грі
+        else:
+            self._take_focus()
 
     # ------------------------------------------------------------ data
     def _run(self, fn, ok, *args, quiet: bool = False):
@@ -702,7 +730,8 @@ class Overlay(QWidget):
         btn.setObjectName("primary")
         btn.setCursor(Qt.PointingHandCursor)
 
-        def copy(bid=best["id"], button=btn):
+        # clicked передає bool «checked» першим аргументом — тому він окремо.
+        def copy(_checked=False, bid=best["id"], button=btn):
             QApplication.clipboard().setText(str(bid))
             button.setText("✓ Скопійовано — встав у пошук збірок у грі")
             QTimer.singleShot(2500, lambda: isValid(button) and button.setText(f"Копіювати ID збірки  {bid}"))
