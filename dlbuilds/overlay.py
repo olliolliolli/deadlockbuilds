@@ -21,7 +21,7 @@ from pathlib import Path
 import requests
 from PySide6.QtCore import QObject, QPoint, QSize, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QColor, QFont, QIcon, QImage, QPainter, QPainterPath, QPixmap
-from PySide6.QtWidgets import (QApplication, QComboBox, QFrame, QGraphicsOpacityEffect, QGridLayout, QHBoxLayout,
+from PySide6.QtWidgets import (QApplication, QComboBox, QFrame, QGraphicsOpacityEffect, QMenu, QSystemTrayIcon, QGridLayout, QHBoxLayout,
                                QLabel, QPushButton, QScrollArea, QSizeGrip, QVBoxLayout, QWidget)
 
 from . import config as cfgmod
@@ -451,11 +451,17 @@ class Overlay(QWidget):
         self._drag = None
 
     def closeEvent(self, e):
+        super().closeEvent(e)
+        self.quit_app()
+
+    def quit_app(self):
+        """Зберегти налаштування й повністю завершити програму."""
         self.cfg["pos"] = [self.x(), self.y()]
         self.cfg["size"] = [self.width(), self.height()]
         self.cfg["rank_index"] = self.rank_box.currentIndex()
         cfgmod.save(self.cfg)
-        super().closeEvent(e)
+        if getattr(self, "_tray", None):
+            self._tray.hide()
         QApplication.quit()
 
     # ------------------------------------------------------------ hotkeys
@@ -470,6 +476,14 @@ class Overlay(QWidget):
             self._return_focus()
             self.update_hud()
             return
+        if not self.isVisible():
+            self.show()
+        self.hud.hide()
+        self.raise_()
+        self._take_focus()
+
+    def show_full(self):
+        """Показати вікно зі збірками (з трея)."""
         if not self.isVisible():
             self.show()
         self.hud.hide()
@@ -549,6 +563,8 @@ class Overlay(QWidget):
         """Ctrl+Shift+X — увімкнути/вимкнути підказку в правому нижньому куті."""
         self.cfg["hud_enabled"] = not self.cfg.get("hud_enabled", True)
         cfgmod.save(self.cfg)
+        if getattr(self, "act_hud", None):
+            self.act_hud.setChecked(self.cfg["hud_enabled"])
         self.update_hud()
 
     # ------------------------------------------------------------ HUD
@@ -850,6 +866,53 @@ def _install_crash_log():
     main._crash_file = f  # тримаємо файл відкритим
 
 
+def _app_icon() -> QIcon:
+    """Іконка програми (малюється кодом, без файлів)."""
+    icon = QIcon()
+    for size in (16, 24, 32, 48, 64):
+        pm = QPixmap(size, size)
+        pm.fill(Qt.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = size * 0.18
+        path = QPainterPath()
+        path.addRoundedRect(0.5, 0.5, size - 1, size - 1, r, r)
+        p.fillPath(path, QColor(GOLD))
+        p.setPen(QColor(26, 22, 18))
+        f = QFont("Segoe UI", 1)
+        f.setBold(True)
+        f.setPixelSize(int(size * 0.62))
+        p.setFont(f)
+        p.drawText(pm.rect(), Qt.AlignCenter, "D")
+        p.end()
+        icon.addPixmap(pm)
+    return icon
+
+
+def _setup_tray(app, w: "Overlay", cfg: dict):
+    icon = _app_icon()
+    app.setWindowIcon(icon)
+    if not QSystemTrayIcon.isSystemTrayAvailable():
+        return
+    tray = QSystemTrayIcon(icon, app)
+    tray.setToolTip("Deadlock Builds")
+    menu = QMenu()
+    menu.setStyleSheet("QMenu { background:#1d1a17; color:#ece6da; border:1px solid #3d3730; }"
+                       "QMenu::item { padding:5px 18px; } QMenu::item:selected { background:#4a3d28; }")
+    menu.addAction("Показати збірки", w.show_full)
+    w.act_hud = menu.addAction("Підказка в куті")
+    w.act_hud.setCheckable(True)
+    w.act_hud.setChecked(bool(cfg.get("hud_enabled", True)))
+    w.act_hud.triggered.connect(lambda *_: w.toggle_clickthrough())
+    menu.addSeparator()
+    menu.addAction("Закрити програму", w.quit_app)
+    tray.setContextMenu(menu)
+    tray.activated.connect(lambda reason: w.show_full()
+                           if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick) else None)
+    tray.show()
+    w._tray, w._tray_menu = tray, menu                  # тримаємо посилання
+
+
 def main():
     _install_crash_log()
     if close_other_instances():
@@ -887,6 +950,7 @@ def main():
     bridge.game.connect(w.on_game)
     watcher = GameWatcher(bridge.game.emit, cfg.get("game_dir") or None)
     watcher.start()
+    _setup_tray(app, w, cfg)
     w.show()
     app.aboutToQuit.connect(w.hud.close)
     code = app.exec()
