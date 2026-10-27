@@ -30,6 +30,7 @@ jobs:
         shell: bash
         run: |
           echo "DATA_URL = \"https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/data/builds.json\"" > dlbuilds/_build_info.py
+          echo "VERSION = \"$(date -u +%m%d)-${GITHUB_SHA::7}\"" >> dlbuilds/_build_info.py
 
       - name: Build DeadlockBuilds.exe
         run: >

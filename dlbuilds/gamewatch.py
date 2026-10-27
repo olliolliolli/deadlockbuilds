@@ -294,3 +294,35 @@ class GameWatcher(threading.Thread):
             except OSError:
                 pass
             self._stop.wait(self.poll)
+
+
+def close_other_instances(exe_name: str = "DeadlockBuilds.exe") -> int:
+    """Закриває інші запущені копії програми (наприклад, стару версію,
+    що лишилась у фоні й тримає гарячі клавіші). Повертає кількість закритих.
+
+    exe від PyInstaller складається з двох процесів (завантажувач + програма),
+    тож свої — це поточний процес і його батьківський."""
+    if sys.platform != "win32" or not getattr(sys, "frozen", False):
+        return 0
+    mine = {os.getpid(), os.getppid()}
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        out = subprocess.run(["tasklist", "/NH", "/FO", "CSV", "/FI", f"IMAGENAME eq {exe_name}"],
+                             capture_output=True, text=True, timeout=5, creationflags=flags).stdout
+    except (OSError, subprocess.SubprocessError):
+        return 0
+    killed = 0
+    for line in out.splitlines():
+        parts = [p.strip('"') for p in line.split('","')]
+        if len(parts) < 2 or not parts[1].strip('"').isdigit():
+            continue
+        pid = int(parts[1].strip('"'))
+        if pid in mine:
+            continue
+        try:
+            subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True,
+                           timeout=5, creationflags=flags)
+            killed += 1
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return killed

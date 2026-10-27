@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import time
 from functools import partial
 from concurrent.futures import ThreadPoolExecutor
@@ -26,11 +27,12 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QFrame, QGraphicsOpacity
 from . import config as cfgmod
 from .analysis import PHASES, RANKS, SLOT_NAMES, Analyzer, Build, ItemRec
 from .api import Client, force_ipv4
-from .gamewatch import GameWatcher, game_running, launch_with_condebug, normalize_hero_key
+from .gamewatch import (GameWatcher, close_other_instances, game_running, launch_with_condebug,
+                        normalize_hero_key)
 from . import winfocus
 from .hotkeys import HotkeyListener, pretty
 from .hud import Hud, next_items
-from .serverdata import ServerData, default_url
+from .serverdata import ServerData, app_version, default_url
 
 try:
     from shiboken6 import isValid
@@ -407,7 +409,7 @@ class Overlay(QWidget):
         # --- footer
         foot = QHBoxLayout()
         self.footer = _label(f"{pretty(cfg['hotkey_toggle'])} — збірки/гра · "
-                             f"{pretty(cfg['hotkey_clickthrough'])} — підказка в куті", "muted")
+                             f"{pretty(cfg['hotkey_clickthrough'])} — підказка · v{app_version()}", "muted")
         foot.addWidget(self.footer)
         foot.addStretch()
         foot.addWidget(QSizeGrip(self))
@@ -571,6 +573,8 @@ class Overlay(QWidget):
         self.update_hud()
 
     def _copy_id(self, bid, button, *_ignored):
+        if isinstance(bid, bool) or not str(bid).isdigit():
+            return                                  # захист: копіюємо лише число
         QApplication.clipboard().setText(str(int(bid)))
         if button is not None and isValid(button):
             old = button.text()
@@ -848,6 +852,8 @@ def _install_crash_log():
 
 def main():
     _install_crash_log()
+    if close_other_instances():
+        time.sleep(0.5)          # стара копія звільняє ресурси
     cfg = cfgmod.load()
     if cfg.get("force_ipv4", True):
         force_ipv4()
@@ -870,8 +876,7 @@ def main():
     bridge.toggle.connect(w.toggle_visible)
     bridge.clickthrough.connect(w.toggle_clickthrough)
     bridge.hk_error.connect(lambda bad: w.footer.setText(
-        "⚠ Не вдалося зайняти " + ", ".join(pretty(b) for b in bad)
-        + " — змініть у config.json"))
+        "⚠ Невідома гаряча клавіша: " + ", ".join(bad) + " — виправ у config.json"))
     hk = HotkeyListener({
         cfg["hotkey_toggle"]: bridge.toggle.emit,
         cfg["hotkey_clickthrough"]: bridge.clickthrough.emit,
@@ -884,4 +889,7 @@ def main():
     watcher.start()
     w.show()
     app.aboutToQuit.connect(w.hud.close)
-    sys.exit(app.exec())
+    code = app.exec()
+    # Гарантовано завершуємо процес: фонові потоки (мережа, лог гри) не мають
+    # тримати програму «живою» без вікна.
+    os._exit(code)

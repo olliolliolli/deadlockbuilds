@@ -15,6 +15,14 @@ FORMAT_VERSION = 1
 FRESH_SEC = 12 * 3600        # старіші дані показуємо, але дораховуємо локально
 
 
+def app_version() -> str:
+    try:
+        from ._build_info import VERSION
+        return VERSION or "dev"
+    except ImportError:
+        return "dev"
+
+
 def default_url() -> str:
     try:
         from ._build_info import DATA_URL
