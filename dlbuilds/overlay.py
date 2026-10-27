@@ -312,7 +312,8 @@ class Overlay(QWidget):
         self.match_started: float | None = None
         self.disp = Dispatcher()
         self.icons = IconCache(cfgmod.app_dir() / "icons", self.disp)
-        self.hud = Hud(self.icons, tuple(cfg.get("hud_margins") or (24, 230)))
+        self.hud = Hud(self.icons, tuple(cfg.get("hud_offset") or (20, 20)),
+                       cfg.get("hud_corner") or "top_left")
         self.hud_timer = QTimer(self)
         self.hud_timer.timeout.connect(self.update_hud)
         self.hud_timer.start(30_000)

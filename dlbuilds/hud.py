@@ -68,13 +68,17 @@ class Hud(QWidget):
     """Фіксований розмір і фіксовані рядки: вікно ніколи не змінює розмір,
     тому не «стрибає». Прив'язане правим нижнім кутом до кута екрана."""
 
-    def __init__(self, icons, margins=(24, 230)):
+    def __init__(self, icons, margins=(20, 20), corner: str = "top_left"):
+        """corner: top_left | top_right | bottom_left | bottom_right;
+        margins — відступи (по горизонталі, по вертикалі) від цього кута екрана."""
         super().__init__(None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
                          | Qt.WindowTransparentForInput | Qt.WindowDoesNotAcceptFocus)
         self.setAttribute(Qt.WA_OpaquePaintEvent)       # непрозоре — не знижує FPS гри
         self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.icons = icons
         self.margins = margins
+        self.corner = corner if corner in ("top_left", "top_right", "bottom_left", "bottom_right") \
+            else "top_left"
         self._sig = None
         self.setFixedSize(WIDTH, HEIGHT)
         self.setStyleSheet("QWidget { color:#ece6da; font-family:'Segoe UI'; font-size:12px; }"
@@ -85,7 +89,9 @@ class Hud(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(12, 9, 12, 10)
         lay.setSpacing(4)
-        lay.addStretch(1)                        # порожнє місце — зверху, вміст притиснутий донизу
+        top = self.corner.startswith("top")
+        if not top:
+            lay.addStretch(1)                    # прив'язка знизу: порожнє місце зверху
         self.title = QLabel()
         self.title.setObjectName("t")
         lay.addWidget(self.title)
@@ -110,6 +116,8 @@ class Hud(QWidget):
         self.footer = QLabel()
         self.footer.setObjectName("m")
         lay.addWidget(self.footer)
+        if top:
+            lay.addStretch(1)                    # прив'язка зверху: порожнє місце знизу
 
     def paintEvent(self, _e):
         p = QPainter(self)
@@ -143,11 +151,11 @@ class Hud(QWidget):
         self.place()
 
     def place(self):
-        """Правий нижній кут вікна = кут екрана мінус відступи."""
+        """Кут вікна = вибраний кут екрана з відступами."""
         scr = QGuiApplication.primaryScreen().geometry()
-        right, bottom = self.margins
-        x = scr.x() + scr.width() - WIDTH - right
-        y = scr.y() + scr.height() - HEIGHT - bottom
+        mx, my = self.margins
+        x = scr.x() + mx if self.corner.endswith("left") else scr.x() + scr.width() - WIDTH - mx
+        y = scr.y() + my if self.corner.startswith("top") else scr.y() + scr.height() - HEIGHT - my
         if self.x() != x or self.y() != y:
             self.move(x, y)
 
