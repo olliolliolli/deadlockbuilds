@@ -25,13 +25,13 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QFrame, QGraphicsOpacity
                                QLabel, QPushButton, QScrollArea, QSizeGrip, QVBoxLayout, QWidget)
 
 from . import config as cfgmod
-from .analysis import PHASES, RANKS, SLOT_NAMES, STYLE_NAMES, Analyzer, Build, ItemRec
+from .analysis import PHASES, RANKS, SLOT_NAMES, STYLE_NAMES, Analyzer, Build, ItemRec, item_image
 from .api import Client, force_ipv4
 from .gamewatch import (GameWatcher, close_other_instances, game_running, launch_with_condebug,
                         normalize_hero_key)
 from . import steamcfg, winfocus
 from .hotkeys import HotkeyListener, pretty
-from .hud import Hud, next_items
+from .hud import Hud, next_from_order, next_items
 from .serverdata import ServerData, app_version, default_url
 
 try:
@@ -235,8 +235,13 @@ class ItemRow(QFrame):
         self.name_lbl = _label(r.name, "itemName")
         mid.addWidget(self.name_lbl)
         when = f"~{r.buy_min:.0f} хв · " if r.buy_min is not None else ""
-        mid.addWidget(_label(f"{when}{r.cost} душ · пік {r.pickrate * 100:.0f}%", "muted"))
+        pick = f" · пік {r.pickrate * 100:.0f}%" if r.matches else ""
+        mid.addWidget(_label(f"{when}{r.cost} душ{pick}", "muted"))
         lay.addLayout(mid, 1)
+        if not r.matches:                         # предмет зі збірки гри без статистики
+            self.setToolTip(f"<b>{r.name}</b><br>{r.cost} душ<br><i>Клік — позначити купленим</i>")
+            self.set_bought(bought)
+            return
 
         right = QVBoxLayout()
         right.setSpacing(0)
@@ -613,13 +618,73 @@ class Overlay(QWidget):
         if not show:
             self.hud.hide()
             return
-        items, how = next_items(self.build_data, self.bought, self._elapsed_min())
+        active = self._active_ingame()
+        if active:
+            items, how = next_from_order(self._ingame_order(active), self.bought, self._elapsed_min())
+        else:
+            items, how = next_items(self.build_data, self.bought, self._elapsed_min())
         self.hud.update_items(self.build_data.hero_name, items, how)
         self.hud.show()
 
     def _toggle_bought(self, item_id: int, on: bool):
         (self.bought.add if on else self.bought.discard)(item_id)
         self.update_hud()
+
+    # ------------------------------------------------------------ in-game build
+    def _active_ingame(self) -> dict | None:
+        hero_id = self.hero_box.currentData()
+        return (self.cfg.get("active_ingame") or {}).get(str(hero_id))
+
+    def _set_active_ingame(self, entry: dict | None):
+        hero_id = self.hero_box.currentData()
+        act = dict(self.cfg.get("active_ingame") or {})
+        if entry:
+            act[str(hero_id)] = {"id": int(entry["id"]), "name": entry.get("name", ""),
+                                 "cats": entry.get("cats") or []}
+        else:
+            act.pop(str(hero_id), None)
+        self.cfg["active_ingame"] = act
+        cfgmod.save(self.cfg)
+        self.bought.clear()
+        if self.build_data:
+            self.show_build(self.build_data)
+
+    def _copy_build(self, entry: dict, button, *_ignored):
+        self._copy_id(entry["id"], button)
+        if entry.get("cats"):
+            self._set_active_ingame(entry)       # підказка в куті веде саме цю збірку
+
+    def _item_rec(self, iid: int, b: Build | None) -> ItemRec | None:
+        """Предмет збірки з гри: статистика з нашої збірки, якщо є, інакше лише назва/ціна."""
+        if b:
+            for r in [*sum((b.phases.get(k) or [] for k, _ in PHASES), []), *b.situational]:
+                if r.item_id == iid:
+                    return r
+        meta = None
+        if self.server and self.server.data:
+            meta = (self.server.data.get("items") or {}).get(str(iid))
+        if not meta:
+            for an in (self.an, self.offline):
+                raw = (getattr(an, "_items", None) or {}).get(iid) if an else None
+                if raw:
+                    meta = {"name": raw.get("name"), "cost": raw.get("cost"), "tier": raw.get("item_tier"),
+                            "slot": str(raw.get("item_slot_type") or "").lower(), "image": item_image(raw)}
+                    break
+        if not meta or meta.get("name") is None:
+            return None
+        return ItemRec(iid, meta["name"], meta.get("slot") or "", int(meta.get("tier") or 0),
+                       int(meta.get("cost") or 0), 0, 0.0, 0.0, 0.0, None, "", meta.get("image"))
+
+    def _ingame_order(self, active: dict) -> list[ItemRec]:
+        out = []
+        for c in active.get("cats") or []:
+            if c.get("optional"):
+                continue
+            for iid in c.get("ids") or []:
+                r = self._item_rec(int(iid), self.build_data)
+                if r and all(x.item_id != r.item_id for x in out):
+                    out.append(r)
+        return out
 
     def _copy_id(self, bid, button, *_ignored):
         if isinstance(bid, bool) or not str(bid).isdigit():
@@ -779,6 +844,19 @@ class Overlay(QWidget):
 
         self._clear()
         self._add(self._ingame_card(b))
+        active = self._active_ingame()
+        if active:
+            for i, c in enumerate(active.get("cats") or [], 1):
+                rows = [r for r in (self._item_rec(int(x), b) for x in c.get("ids") or []) if r]
+                if not rows:
+                    continue
+                title = c.get("name") or f"Розділ {i}"
+                sec = Section(("Необов'язково · " if c.get("optional") else "Гра · ") + title,
+                              f"{sum(r.cost for r in rows):,} душ".replace(",", " "))
+                for r in rows:
+                    sec.lay.addWidget(ItemRow(r, self.icons, r.item_id in self.bought, self._toggle_bought))
+                self._add(sec)
+            self._add(_label("Нижче — статистична збірка програми для порівняння.", "muted", wrap=True))
         for key, title in PHASES:
             lst = b.phases.get(key) or []
             if not lst:
@@ -860,6 +938,14 @@ class Overlay(QWidget):
         lay.setContentsMargins(10, 8, 10, 10)
         lay.setSpacing(4)
         lay.addWidget(_label("ЗБІРКА ДЛЯ ГРИ", "section"))
+        active = self._active_ingame()
+        if active:
+            lay.addWidget(_label(f"✓ Підказка в куті веде збірку «{active.get('name')}» "
+                                 f"(ID {active.get('id')}). Її предмети — нижче.", "warn", wrap=True))
+            back = QPushButton("Повернути статистичну збірку")
+            back.setObjectName("ghost")
+            back.clicked.connect(lambda *_: self._set_active_ingame(None))
+            lay.addWidget(back)
         if not b.ingame:
             lay.addWidget(_label("Не знайшов опублікованої збірки, схожої на рекомендовану. "
                                  "Можна зібрати її вручну за списком нижче.", "muted", wrap=True))
@@ -881,7 +967,7 @@ class Overlay(QWidget):
         btn.setCursor(Qt.PointingHandCursor)
 
         # partial: clicked додає свій bool «checked» лише в кінець (*_ignored).
-        btn.clicked.connect(partial(self._copy_id, int(best["id"]), btn))
+        btn.clicked.connect(partial(self._copy_build, best, btn))
         lay.addWidget(btn)
         how = _label("У грі: магазин → «Збірки» (Builds) → пошук → Ctrl+V → обрати збірку.",
                      "muted", wrap=True)
@@ -894,7 +980,7 @@ class Overlay(QWidget):
                 a = QPushButton(f"{p['match'] * 100:.0f}% · {p['id']}")
                 a.setObjectName("ghost")
                 a.setToolTip(f"{p['name']} · ★ {p['favorites']}")
-                a.clicked.connect(partial(self._copy_id, int(p["id"]), a))
+                a.clicked.connect(partial(self._copy_build, p, a))
                 alt.addWidget(a)
             alt.addStretch()
             lay.addLayout(alt)

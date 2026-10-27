@@ -16,7 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from dlbuilds.analysis import RANKS, Analyzer, build_to_dict, hero_image  # noqa: E402
+from dlbuilds.analysis import RANKS, Analyzer, build_to_dict, hero_image, item_image  # noqa: E402
 from dlbuilds.api import Client  # noqa: E402
 
 FORMAT_VERSION = 1
@@ -84,6 +84,15 @@ def main(out_dir: str) -> int:
         print(f"Забагато помилок ({len(errors)}/{len(jobs)}) — старі дані не перезаписую")
         return 1
 
+    # Довідник предметів, що трапляються в збірках для гри (назва, ціна, іконка).
+    meta = an.items()
+    used = {i for d in builds.values() for g in d.get("ingame") or []
+            for c in g.get("cats") or [] for i in c["ids"]}
+    items_out = {str(i): {"name": meta[i].get("name"), "cost": int(meta[i].get("cost") or 0),
+                          "slot": str(meta[i].get("item_slot_type") or "").lower(),
+                          "tier": int(meta[i].get("item_tier") or 0), "image": item_image(meta[i])}
+                 for i in used if i in meta}
+
     data = {
         "format": FORMAT_VERSION,
         "generated_at": int(time.time()),
@@ -91,6 +100,7 @@ def main(out_dir: str) -> int:
         "heroes": [{"id": int(h["id"]), "name": h.get("name"), "class_name": h.get("class_name"),
                     "image": hero_image(h)} for h in heroes],
         "builds": builds,
+        "items": items_out,
         "errors": dict(errors[:50]),
     }
     path = out / "builds.json"

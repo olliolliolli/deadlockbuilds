@@ -445,12 +445,18 @@ def parse_ingame_build(entry: dict) -> dict | None:
     if not bid:
         return None
     items: set[int] = set()
+    cats_out: list[dict] = []
     for cats in _walk(hb, "mod_categories"):
         for cat in cats if isinstance(cats, list) else []:
+            ids = []
             for mod in (cat or {}).get("mods") or []:
                 aid = (mod or {}).get("ability_id")
                 if aid is not None:
                     items.add(int(aid))
+                    ids.append(int(aid))
+            if ids:
+                cats_out.append({"name": str((cat or {}).get("name") or "").strip(),
+                                 "optional": bool((cat or {}).get("optional")), "ids": ids})
     if not items:
         return None
     fav = entry.get("num_weekly_favorites")
@@ -463,6 +469,7 @@ def parse_ingame_build(entry: dict) -> dict | None:
         "favorites": int(fav or 0),
         "updated": hb.get("last_updated_timestamp") or hb.get("publish_timestamp"),
         "items": items,
+        "cats": cats_out,          # розділи збірки в порядку автора
     }
 
 

@@ -46,6 +46,24 @@ ROWS = 4
 WIDTH, HEIGHT = 270, 200
 
 
+SOULS_PER_MIN = 1000   # грубо: скільки душ гравець витрачає за хвилину матчу
+
+
+def next_from_order(order: list[ItemRec], bought: set[int], elapsed_min: float | None,
+                    n: int = 4) -> tuple[list[ItemRec], str]:
+    """Як next_items, але для збірки з гри (порядок автора, без статистики часу).
+    Без позначок пропускає предмети, на які за цей час уже мали б назбирати душ."""
+    if bought:
+        return [r for r in order if r.item_id not in bought][:n], "без позначених як куплені"
+    if elapsed_min is not None and elapsed_min > 1:
+        budget, spent, i = SOULS_PER_MIN * elapsed_min * 0.9, 0, 0
+        while i < len(order) and spent + order[i].cost <= budget:
+            spent += order[i].cost
+            i += 1
+        return order[i:i + n], f"за часом матчу (~{elapsed_min:.0f} хв)"
+    return order[:n], "початок збірки"
+
+
 class Hud(QWidget):
     """Фіксований розмір і фіксовані рядки: вікно ніколи не змінює розмір,
     тому не «стрибає». Прив'язане правим нижнім кутом до кута екрана."""
