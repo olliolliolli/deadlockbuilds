@@ -286,9 +286,10 @@ def _detect_styles(rows, hero_m) -> tuple[list[str], int | None]:
         iid = r.get("item_id")
         if iid is not None and int(iid) in SUPPORT_ITEMS and _matches(r) > best_m:
             best, best_m = int(iid), _matches(r)
+    # Дамаг (без саппорт-предметів) доступний завжди; саппорт — коли є достатньо матчів.
     if best and best_m / hero_m >= STYLE_MIN_PICK and best_m >= STYLE_MIN_MATCHES:
         return ["damage", "support"], best
-    return [], best
+    return ["damage"], best
 
 
 # ---------------------------------------------------------------- helpers
