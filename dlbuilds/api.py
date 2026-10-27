@@ -207,26 +207,30 @@ class Client:
         return sorted(out.values(), reverse=True)
 
     # ------------------------------------------------------------ analytics
-    def hero_stats(self, min_ts: int, min_badge: int | None):
+    # flt — додаткові фільтри матчів, напр. {"include_item_ids": "123"} (купив предмет)
+    # або {"exclude_item_ids": "1,2,3"} (не купував жодного з них).
+    def hero_stats(self, min_ts: int, min_badge: int | None, flt: dict | None = None):
         return self.analytics("hero-stats", {
-            "min_unix_timestamp": min_ts, "min_average_badge": min_badge, "game_mode": "normal"})
+            "min_unix_timestamp": min_ts, "min_average_badge": min_badge, "game_mode": "normal",
+            **(flt or {})})
 
-    def item_stats(self, hero_id: int, min_ts: int, min_badge: int | None):
+    def item_stats(self, hero_id: int, min_ts: int, min_badge: int | None, flt: dict | None = None):
         return self.analytics("item-stats", {
             "min_unix_timestamp": min_ts, "min_average_badge": min_badge,
-            "game_mode": "normal"}, hero_id=hero_id)
+            "game_mode": "normal", **(flt or {})}, hero_id=hero_id)
 
-    def item_stats_all(self, min_ts: int, min_badge: int | None):
+    def item_stats_all(self, min_ts: int, min_badge: int | None, flt: dict | None = None):
         """Статистика предметів одразу для всіх героїв (bucket = hero_id)."""
         return self.analytics("item-stats", {
             "min_unix_timestamp": min_ts, "min_average_badge": min_badge,
-            "game_mode": "normal", "bucket": "hero"})
+            "game_mode": "normal", "bucket": "hero", **(flt or {})})
 
-    def builds(self, hero_id: int, since: int | None = None) -> list[dict]:
+    def builds(self, hero_id: int, since: int | None = None, tag: int | None = None) -> list[dict]:
         """Опубліковані в ігровому браузері збірки героя (останні версії).
         since — лише оновлені після цього моменту (наприклад, після патча)."""
         url = f"{API}/v1/builds"
-        base = {"hero_id": hero_id, "only_latest": "true", "limit": 100, "min_unix_timestamp": since}
+        base = {"hero_id": hero_id, "only_latest": "true", "limit": 100, "min_unix_timestamp": since,
+                "tag": tag}
         last: ApiError | None = None
         for sort in ("weekly_favorites", "favorites", None):
             try:
@@ -237,10 +241,10 @@ class Client:
                 last = e
         raise last or ApiError("bad request")
 
-    def ability_order(self, hero_id: int, min_ts: int, min_badge: int | None):
+    def ability_order(self, hero_id: int, min_ts: int, min_badge: int | None, flt: dict | None = None):
         return self.analytics("ability-order-stats", {
             "min_unix_timestamp": min_ts, "min_average_badge": min_badge,
-            "game_mode": "normal"}, hero_id=hero_id)
+            "game_mode": "normal", **(flt or {})}, hero_id=hero_id)
 
 
 def parse_date(v) -> int | None:

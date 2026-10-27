@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QFrame, QGraphicsOpacity
                                QLabel, QPushButton, QScrollArea, QSizeGrip, QVBoxLayout, QWidget)
 
 from . import config as cfgmod
-from .analysis import PHASES, RANKS, SLOT_NAMES, Analyzer, Build, ItemRec
+from .analysis import PHASES, RANKS, SLOT_NAMES, STYLE_NAMES, Analyzer, Build, ItemRec
 from .api import Client, force_ipv4
 from .gamewatch import (GameWatcher, close_other_instances, game_running, launch_with_condebug,
                         normalize_hero_key)
@@ -364,6 +364,10 @@ class Overlay(QWidget):
         self.rank_box.setCurrentIndex(int(cfg.get("rank_index", 2)))
         pick.addWidget(self.hero_box, 3)
         pick.addWidget(self.rank_box, 2)
+        self.style_box = QComboBox()
+        self.style_box.setToolTip("Стиль гри: загальна статистика, дамаг або саппорт")
+        self.style_box.hide()
+        pick.addWidget(self.style_box, 2)
         root.addLayout(pick)
 
         # --- статус автовизначення героя
@@ -417,6 +421,7 @@ class Overlay(QWidget):
 
         self.hero_box.currentIndexChanged.connect(lambda _i: self.load())
         self.rank_box.currentIndexChanged.connect(lambda _i: self.load())
+        self.style_box.activated.connect(self._style_changed)
         self._heroes_shown = False
         if self.server:
             # Готові збірки з сервера: спершу збережена копія (миттєво), потім свіжа.
@@ -646,6 +651,7 @@ class Overlay(QWidget):
         if hero_id is None:
             return
         badge = RANKS[self.rank_box.currentIndex()][1]
+        style = (self.cfg.get("styles") or {}).get(str(hero_id), "")
         if self.cfg.get("hero_id") != hero_id:
             self.bought.clear()
         self.cfg["hero_id"] = hero_id
@@ -663,7 +669,7 @@ class Overlay(QWidget):
 
         # 0) готова збірка з сервера
         if self.server and not force:
-            sb = self.server.build(hero_id, self.rank_box.currentIndex())
+            sb = self.server.build(hero_id, self.rank_box.currentIndex(), style)
             if sb:
                 self.show_build(sb, stale=not self.server.fresh, server_ts=self.server.generated_at)
                 if self.server.fresh:
@@ -674,7 +680,7 @@ class Overlay(QWidget):
             def cached(build):
                 if req == self._req and not self._fresh:
                     self.show_build(build, stale=True)
-            self._run(self.offline.build, cached, hero_id, badge, quiet=True)
+            self._run(self.offline.build, cached, hero_id, badge, style, quiet=True)
 
         # 2) свіжі дані з мережі
         def done(build):
@@ -683,7 +689,7 @@ class Overlay(QWidget):
                 self._fresh = True
                 self.show_build(build)
 
-        self._run(self.an.build, done, hero_id, badge)
+        self._run(self.an.build, done, hero_id, badge, style)
 
     # ------------------------------------------------------------ rendering
     def _clear(self):
@@ -702,12 +708,38 @@ class Overlay(QWidget):
             elif self._heroes_shown:
                 self.load()
 
+    def _style_changed(self, idx: int):
+        hero_id = self.hero_box.currentData()
+        if hero_id is None:
+            return
+        styles = dict(self.cfg.get("styles") or {})
+        styles[str(hero_id)] = self.style_box.itemData(idx) or ""
+        self.cfg["styles"] = styles
+        cfgmod.save(self.cfg)
+        self.bought.clear()
+        self.load()
+
+    def _sync_style_box(self, b: Build):
+        self.style_box.blockSignals(True)
+        self.style_box.clear()
+        if b.styles:
+            for key in [""] + list(b.styles):
+                self.style_box.addItem(STYLE_NAMES.get(key, key), key)
+            self.style_box.setCurrentIndex(max(0, self.style_box.findData(b.style or "")))
+            self.style_box.show()
+        else:
+            self.style_box.hide()
+        self.style_box.blockSignals(False)
+
     def show_build(self, b: Build, stale: bool = False, server_ts: int = 0):
         self.build_data = b
+        self._sync_style_box(b)
         self.btn_refresh.setEnabled(not stale or bool(server_ts))
         self.hero_name.setText(b.hero_name)
         self.icons.set_icon(self.hero_icon, b.hero_image, 44, 7)
         wr = f" · WR {b.hero_wr * 100:.1f}%" if b.hero_wr is not None else ""
+        if b.style:
+            wr = f" · {STYLE_NAMES.get(b.style, b.style).lower()}{wr}"
         upd = " · оновлюю…" if stale else ""
         if server_ts and not stale:
             upd = f" · оновлено о {datetime.fromtimestamp(server_ts):%H:%M}"

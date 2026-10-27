@@ -83,8 +83,10 @@ class ServerData:
     def heroes(self) -> list[dict]:
         return list((self.data or {}).get("heroes") or [])
 
-    def build(self, hero_id: int, rank_index: int) -> Build | None:
-        d = ((self.data or {}).get("builds") or {}).get(f"{hero_id}:{rank_index}")
+    def build(self, hero_id: int, rank_index: int, style: str = "") -> Build | None:
+        allb = (self.data or {}).get("builds") or {}
+        d = (allb.get(f"{hero_id}:{rank_index}:{style}") if style else None) \
+            or allb.get(f"{hero_id}:{rank_index}")
         if not d:
             return None
         try:

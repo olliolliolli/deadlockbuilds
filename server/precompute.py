@@ -40,31 +40,47 @@ def main(out_dir: str) -> int:
 
     builds, errors = {}, {}
 
+    def key(hid, ri, style):
+        return f"{hid}:{ri}" + (f":{style}" if style else "")
+
     def run(batch, workers):
         with ThreadPoolExecutor(workers) as ex:
-            futs = {ex.submit(an.build, hid, RANKS[ri][1]): (hid, ri) for hid, ri in batch}
+            futs = {ex.submit(an.build, hid, RANKS[ri][1], style): (hid, ri, style)
+                    for hid, ri, style in batch}
             for f in as_completed(futs):
-                hid, ri = futs[f]
+                hid, ri, style = futs[f]
+                k = key(hid, ri, style)
                 try:
-                    builds[f"{hid}:{ri}"] = build_to_dict(f.result())
-                    errors.pop(f"{hid}:{ri}", None)
+                    builds[k] = build_to_dict(f.result())
+                    errors.pop(k, None)
                 except Exception as e:  # noqa: BLE001
-                    errors[f"{hid}:{ri}"] = f"{type(e).__name__}: {e}"[:300]
+                    errors[k] = f"{type(e).__name__}: {e}"[:300]
 
-    run(jobs, 2)
-    # Друге й третє коло для тих, що впали (ліміт запитів, тайм-аути).
-    for attempt in (1, 2):
-        failed = [(int(k.split(":")[0]), int(k.split(":")[1])) for k in errors]
-        if not failed:
-            break
-        print(f"Повтор {attempt}: {len(failed)} збірок")
-        time.sleep(20 * attempt)
-        run(failed, 1)
+    def retry():
+        for attempt in (1, 2):
+            failed = [(int(k.split(":")[0]), int(k.split(":")[1]),
+                       k.split(":")[2] if k.count(":") == 2 else "") for k in errors]
+            if not failed:
+                return
+            print(f"Повтор {attempt}: {len(failed)} збірок")
+            time.sleep(20 * attempt)
+            run(failed, 1)
+
+    run([(hid, ri, "") for hid, ri in jobs], 2)
+    retry()
+
+    # Дамаг/саппорт — лише для героїв, у яких саппорт-стиль грають помітно часто.
+    style_jobs = [(int(k.split(":")[0]), int(k.split(":")[1]), st)
+                  for k, d in list(builds.items()) for st in d.get("styles") or []]
+    print(f"Стилі: {len(style_jobs)} збірок для "
+          f"{len({j[0] for j in style_jobs})} героїв")
+    run(style_jobs, 2)
+    retry()
 
     errors = list(errors.items())
     for k, e in errors[:20]:
         print("ERR", k, e)
-    if len(builds) < len(jobs) * 0.5:
+    if sum(1 for k in builds if k.count(":") == 1) < len(jobs) * 0.5:
         print(f"Забагато помилок ({len(errors)}/{len(jobs)}) — старі дані не перезаписую")
         return 1
 

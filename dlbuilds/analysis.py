@@ -19,6 +19,20 @@ RANKS = [
 
 PHASES = [("early", "Лейн / ранній етап"), ("mid", "Середина гри"), ("late", "Пізня гра")]
 SLOT_NAMES = {"weapon": "Зброя", "vitality": "Живучість", "spirit": "Дух"}
+# Предмети, які купують саме для підтримки союзників. Матчі з таким предметом —
+# «саппорт», без жодного з них — «дамаг».
+SUPPORT_ITEMS = {
+    1804594021: "Rescue Beam",
+    1662311306: "Divine Barrier",
+    2956256701: "Healing Nova",
+    2059712766: "Restorative Locket",
+    857669956: "Guardian Ward",
+}
+STYLE_NAMES = {"": "Загальна", "damage": "Дамаг", "support": "Саппорт"}
+HEALING_TAG = 38758251          # тег «Healing» в ігровому браузері збірок
+STYLE_MIN_PICK = 0.10           # саппорт-стиль показуємо, якщо його грають ≥10% матчів
+STYLE_MIN_MATCHES = 800
+
 SMOOTH_K = 250          # байєсівське згладжування вінрейту (у матчах)
 CORE_PICK = 0.08        # від цього пікрейту предмет вважається «основним»
 SITU_PICK = 0.02
@@ -57,6 +71,9 @@ class Build:
     notes: list[str] = field(default_factory=list)
     created: float = field(default_factory=time.time)
     hero_image: str | None = None
+    style: str = ""                                   # "", "damage", "support"
+    styles: list[str] = field(default_factory=list)   # доступні стилі для героя
+    style_anchor: int | None = None                   # головний саппорт-предмет
     ability_icons: dict[str, str] = field(default_factory=dict)
     ingame: list[dict] = field(default_factory=list)   # найближчі опубліковані в грі збірки
 
@@ -147,10 +164,16 @@ class Analyzer:
             label = f"{label} (після останнього патча ще мало матчів)"
         return start, label, row, m
 
-    def _ingame_entries(self, hero_id: int, start: int) -> list[dict]:
-        """Популярні збірки, оновлені після патча, + популярні загалом."""
+    def _ingame_entries(self, hero_id: int, start: int, tag: int | None = None) -> list[dict]:
+        """Популярні збірки, оновлені після патча, + популярні загалом
+        (для саппорта — ще й збірки з тегом «Healing»)."""
         out, seen = [], set()
         lists = []
+        if tag:
+            try:
+                lists.append(self.c.builds(hero_id, tag=tag))
+            except (ApiError, TypeError):
+                pass
         try:
             lists.append(self.c.builds(hero_id, since=start))
         except (ApiError, TypeError):
@@ -165,46 +188,74 @@ class Analyzer:
                     out.append(e)
         return out
 
-    def _bulk_rows(self, hero_id: int, start: int, badge: int | None) -> list[dict]:
-        key = (start, badge)
+    def _bulk_rows(self, hero_id: int, start: int, badge: int | None,
+                   flt: dict | None = None) -> list[dict]:
+        key = (start, badge, tuple(sorted((flt or {}).items())))
         with self._bulk_lock:
             if key not in self._bulk_items:
                 grouped: dict[int, list] = {}
-                for r in self.c.item_stats_all(start, badge):
+                for r in self.c.item_stats_all(start, badge, flt):
                     grouped.setdefault(int(r.get("bucket", -1)), []).append(r)
                 self._bulk_items[key] = grouped
         return self._bulk_items[key].get(hero_id, [])
 
+    def _rows(self, hero_id, start, badge, flt=None):
+        if self.bulk:
+            return self._bulk_rows(hero_id, start, badge, flt)
+        return self.c.item_stats(hero_id, start, badge, flt)
+
     # ------------------------------------------------------------ main
-    def build(self, hero_id: int, badge: int | None) -> Build:
+    def build(self, hero_id: int, badge: int | None, style: str = "") -> Build:
         hero = next((h for h in self.heroes() if int(h["id"]) == hero_id), {"name": str(hero_id)})
         items = self.items()
         start, label, hero_row, hero_m = self.pick_window(hero_id, badge)
         hero_wr = (_num(hero_row, "wins") / hero_m) if hero_row and hero_m else None
+        abil_badge = None if self.bulk else badge
 
-        b = Build(hero_id, hero.get("name", "?"), label, start, hero_m, hero_wr,
-                  hero_image=hero_image(hero))
-
-        # Три незалежні запити — паралельно.
+        # Загальна статистика потрібна завжди: з неї видно, чи є в героя саппорт-стиль.
         with ThreadPoolExecutor(3) as ex:
-            if self.bulk:
-                f_items = ex.submit(self._bulk_rows, hero_id, start, badge)
-                f_abil = ex.submit(self.c.ability_order, hero_id, start, None)
-            else:
-                f_items = ex.submit(self.c.item_stats, hero_id, start, badge)
-                f_abil = ex.submit(self.c.ability_order, hero_id, start, badge)
-            f_builds = ex.submit(self._ingame_entries, hero_id, start)
+            f_items = ex.submit(self._rows, hero_id, start, badge)
+            f_abil = ex.submit(self.c.ability_order, hero_id, start, abil_badge) if not style else None
+            f_builds = ex.submit(self._ingame_entries, hero_id, start) if not style else None
             rows = f_items.result()
-        buy_min = {int(r["item_id"]): float(r["avg_buy_time_s"]) / 60
-                   for r in rows if r.get("item_id") is not None and r.get("avg_buy_time_s") is not None}
-
         if not hero_m:
             hero_m = max((_matches(r) for r in rows), default=0)
-            b.hero_matches = hero_m
+        styles, anchor = _detect_styles(rows, hero_m)
+        if style not in styles:
+            style = ""
+        if not style and f_abil is None:      # просили стиль, якого в героя немає
+            with ThreadPoolExecutor(2) as ex:
+                f_abil = ex.submit(self.c.ability_order, hero_id, start, abil_badge)
+                f_builds = ex.submit(self._ingame_entries, hero_id, start)
+
+        flt = None
+        if style:
+            flt = ({"include_item_ids": str(anchor)} if style == "support"
+                   else {"exclude_item_ids": ",".join(str(i) for i in SUPPORT_ITEMS)})
+            with ThreadPoolExecutor(4) as ex:
+                f_items = ex.submit(self._rows, hero_id, start, badge, flt)
+                f_hero = ex.submit(self.c.hero_stats, start, badge, flt)
+                f_abil = ex.submit(self.c.ability_order, hero_id, start, abil_badge, flt)
+                f_builds = ex.submit(self._ingame_entries, hero_id, start,
+                                     HEALING_TAG if style == "support" else None)
+                rows = f_items.result()
+                try:
+                    hrow = next((r for r in f_hero.result() if int(r.get("hero_id", -1)) == hero_id), None)
+                except ApiError:
+                    hrow = None
+            if hrow and _matches(hrow):
+                hero_m, hero_wr = _matches(hrow), _num(hrow, "wins") / _matches(hrow)
+            else:
+                hero_m, hero_wr = max((_matches(r) for r in rows), default=0), None
+
+        b = Build(hero_id, hero.get("name", "?"), label, start, hero_m, hero_wr,
+                  hero_image=hero_image(hero), style=style, styles=styles, style_anchor=anchor)
         if not hero_m:
             b.notes.append("Немає матчів для цього героя в обраному вікні.")
             return b
 
+        buy_min = {int(r["item_id"]): float(r["avg_buy_time_s"]) / 60
+                   for r in rows if r.get("item_id") is not None and r.get("avg_buy_time_s") is not None}
         recs = _score_items(rows, items, hero_m, buy_min)
         _fill_build(b, recs)
 
@@ -221,6 +272,20 @@ class Analyzer:
         if hero_m < 500:
             b.notes.append("Мала вибірка — рекомендації можуть бути неточними.")
         return b
+
+
+def _detect_styles(rows, hero_m) -> tuple[list[str], int | None]:
+    """Чи грають героя як саппорта достатньо часто, і який саппорт-предмет головний."""
+    if not hero_m:
+        return [], None
+    best, best_m = None, 0
+    for r in rows if isinstance(rows, list) else []:
+        iid = r.get("item_id")
+        if iid is not None and int(iid) in SUPPORT_ITEMS and _matches(r) > best_m:
+            best, best_m = int(iid), _matches(r)
+    if best and best_m / hero_m >= STYLE_MIN_PICK and best_m >= STYLE_MIN_MATCHES:
+        return ["damage", "support"], best
+    return [], best
 
 
 # ---------------------------------------------------------------- helpers
