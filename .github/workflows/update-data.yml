@@ -26,7 +26,10 @@ jobs:
       - run: pip install requests
 
       - name: Compute builds for all heroes
-        run: python server/precompute.py out
+        run: |
+          set -o pipefail
+          mkdir -p out
+          python -u server/precompute.py out 2>&1 | tee run.log
 
       - name: Publish to the "data" branch
         env:
@@ -39,3 +42,17 @@ jobs:
           git add builds.json
           git commit -q -m "builds $(date -u +%Y-%m-%dT%H:%MZ)"
           git push -q -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" data
+
+      - name: Publish the log to the "debug" branch (on failure)
+        if: failure()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir dbg && cp run.log dbg/ 2>/dev/null || echo "no log" > dbg/run.log
+          cd dbg
+          git init -q -b debug
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add run.log
+          git commit -q -m "debug log"
+          git push -q -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" debug

@@ -27,7 +27,7 @@ def main(out_dir: str) -> int:
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     cache = Path(tempfile.mkdtemp(prefix="dlb-cache-"))
-    an = Analyzer(Client(cache, ttl=3600, verbose=False))
+    an = Analyzer(Client(cache, ttl=3600, verbose=True))
 
     heroes = an.heroes()
     an.items()           # прогріваємо довідники до запуску потоків
