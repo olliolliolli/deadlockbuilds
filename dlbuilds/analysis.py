@@ -77,8 +77,14 @@ def _matches(row: dict) -> int:
 
 
 class Analyzer:
-    def __init__(self, client: Client, min_hero_matches: int = 1500, fallback_days: int = 14):
+    def __init__(self, client: Client, min_hero_matches: int = 1500, fallback_days: int = 14,
+                 bulk: bool = False):
+        """bulk=True (сервер): статистика предметів одним запитом для всіх героїв,
+        порядок здібностей — без фільтра рангу. У ~4 рази менше запитів до API."""
         self.c = client
+        self.bulk = bulk
+        self._bulk_items: dict = {}
+        self._bulk_lock = __import__("threading").Lock()
         self.min_hero_matches = min_hero_matches
         self.fallback_days = fallback_days
         self._items: dict[int, dict] | None = None
@@ -141,6 +147,16 @@ class Analyzer:
             label = f"{label} (після останнього патча ще мало матчів)"
         return start, label, row, m
 
+    def _bulk_rows(self, hero_id: int, start: int, badge: int | None) -> list[dict]:
+        key = (start, badge)
+        with self._bulk_lock:
+            if key not in self._bulk_items:
+                grouped: dict[int, list] = {}
+                for r in self.c.item_stats_all(start, badge):
+                    grouped.setdefault(int(r.get("bucket", -1)), []).append(r)
+                self._bulk_items[key] = grouped
+        return self._bulk_items[key].get(hero_id, [])
+
     # ------------------------------------------------------------ main
     def build(self, hero_id: int, badge: int | None) -> Build:
         hero = next((h for h in self.heroes() if int(h["id"]) == hero_id), {"name": str(hero_id)})
@@ -153,8 +169,12 @@ class Analyzer:
 
         # Три незалежні запити — паралельно.
         with ThreadPoolExecutor(3) as ex:
-            f_items = ex.submit(self.c.item_stats, hero_id, start, badge)
-            f_abil = ex.submit(self.c.ability_order, hero_id, start, badge)
+            if self.bulk:
+                f_items = ex.submit(self._bulk_rows, hero_id, start, badge)
+                f_abil = ex.submit(self.c.ability_order, hero_id, start, None)
+            else:
+                f_items = ex.submit(self.c.item_stats, hero_id, start, badge)
+                f_abil = ex.submit(self.c.ability_order, hero_id, start, badge)
             f_builds = ex.submit(self.c.builds, hero_id)
             rows = f_items.result()
         buy_min = {int(r["item_id"]): float(r["avg_buy_time_s"]) / 60

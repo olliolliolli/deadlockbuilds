@@ -27,11 +27,14 @@ def main(out_dir: str) -> int:
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     cache = Path(tempfile.mkdtemp(prefix="dlb-cache-"))
-    an = Analyzer(Client(cache, ttl=3600, verbose=False))
+    an = Analyzer(Client(cache, ttl=3600, attempts=5, min_interval=0.4), bulk=True)
 
     heroes = an.heroes()
     an.items()           # прогріваємо довідники до запуску потоків
-    an.windows()
+    # Прогріваємо спільні запити послідовно, щоб потоки не дублювали їх.
+    for start, _ in an.windows()[:3]:
+        for _, badge in RANKS:
+            an.c.hero_stats(start, badge)
     jobs = [(int(h["id"]), ri) for h in heroes for ri in range(len(RANKS))]
     print(f"{len(heroes)} героїв × {len(RANKS)} рангів = {len(jobs)} збірок")
 
@@ -48,7 +51,7 @@ def main(out_dir: str) -> int:
                 except Exception as e:  # noqa: BLE001
                     errors[f"{hid}:{ri}"] = f"{type(e).__name__}: {e}"[:300]
 
-    run(jobs, 3)
+    run(jobs, 2)
     # Друге й третє коло для тих, що впали (ліміт запитів, тайм-аути).
     for attempt in (1, 2):
         failed = [(int(k.split(":")[0]), int(k.split(":")[1])) for k in errors]

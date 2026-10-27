@@ -43,13 +43,18 @@ class Client:
     підтягує окремим онлайн-клієнтом у фоні."""
 
     def __init__(self, cache_dir: Path, ttl: int = 3600, verbose: bool = False,
-                 offline: bool = False, log_path: Path | None = None):
+                 offline: bool = False, log_path: Path | None = None,
+                 attempts: int = 3, min_interval: float = 0.0):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.ttl = ttl
         self.verbose = verbose
         self.offline = offline
         self.log_path = log_path
+        self.attempts = attempts
+        self.min_interval = min_interval     # пауза між запитами (для сервера)
+        self._rate_lock = threading.Lock()
+        self._next_at = 0.0
         self.s = requests.Session()
         self.s.headers["User-Agent"] = "dl-builds-overlay/1.1 (personal use)"
         adapter = requests.adapters.HTTPAdapter(pool_connections=8, pool_maxsize=16)
@@ -88,7 +93,13 @@ class Client:
             raise ApiError("немає збережених даних", 0)
 
         last_err: Exception | None = None
-        for attempt in range(3):
+        for attempt in range(self.attempts):
+            if self.min_interval:
+                with self._rate_lock:
+                    wait = self._next_at - time.time()
+                    self._next_at = max(time.time(), self._next_at) + self.min_interval
+                if wait > 0:
+                    time.sleep(wait)
             t0 = time.time()
             try:
                 r = self.s.get(url, params=params, timeout=(5, 30))
@@ -106,6 +117,11 @@ class Client:
             if r.status_code >= 500:
                 last_err = ApiError(f"{r.status_code} {r.text[:200]}", r.status_code)
                 time.sleep(1 + attempt)
+                continue
+            if r.status_code == 403 and "<html" in r.text[:500].lower():
+                # Захист Cloudflare від частих запитів — чекаємо й пробуємо знову.
+                last_err = ApiError("403 Cloudflare", 403)
+                time.sleep(min(60, 10 * (attempt + 1)))
                 continue
             if r.status_code >= 400:
                 raise ApiError(f"{r.status_code} {url}: {r.text[:300]}", r.status_code)
@@ -199,6 +215,12 @@ class Client:
         return self.analytics("item-stats", {
             "min_unix_timestamp": min_ts, "min_average_badge": min_badge,
             "game_mode": "normal"}, hero_id=hero_id)
+
+    def item_stats_all(self, min_ts: int, min_badge: int | None):
+        """Статистика предметів одразу для всіх героїв (bucket = hero_id)."""
+        return self.analytics("item-stats", {
+            "min_unix_timestamp": min_ts, "min_average_badge": min_badge,
+            "game_mode": "normal", "bucket": "hero"})
 
     def builds(self, hero_id: int) -> list[dict]:
         """Опубліковані в ігровому браузері збірки героя (останні версії)."""
