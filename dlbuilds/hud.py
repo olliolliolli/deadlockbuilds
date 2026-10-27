@@ -4,9 +4,9 @@
 """
 from __future__ import annotations
 
-from PySide6.QtCore import QRect, Qt
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPainterPath
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QLayout, QVBoxLayout, QWidget
 
 from .analysis import PHASES, Build, ItemRec
 
@@ -56,7 +56,9 @@ class Hud(QWidget):
         self.lay = QVBoxLayout(self)
         self.lay.setContentsMargins(12, 9, 12, 10)
         self.lay.setSpacing(4)
-        self.setFixedWidth(250)
+        # Вікно завжди рівно під розмір вмісту; кожна зміна розміру → resizeEvent → place().
+        self.lay.setSizeConstraint(QLayout.SetFixedSize)
+        self.setMinimumWidth(250)
 
     def paintEvent(self, _e):
         p = QPainter(self)
@@ -72,12 +74,16 @@ class Hud(QWidget):
             item = self.lay.takeAt(0)
             w = item.widget()
             if w:
+                w.hide()
+                w.setParent(None)
                 w.deleteLater()
             elif item.layout():
                 lay = item.layout()
                 while lay.count():
                     sub = lay.takeAt(0).widget()
                     if sub:
+                        sub.hide()
+                        sub.setParent(None)
                         sub.deleteLater()
 
     def update_items(self, hero: str, items: list[ItemRec], how: str):
@@ -110,13 +116,23 @@ class Hud(QWidget):
             m = QLabel(f"Разом {total:,} душ · {how}".replace(",", " "))
             m.setObjectName("m")
             self.lay.addWidget(m)
-        self.adjustSize()
+        self.ensurePolished()
+        self.lay.activate()
         self.place()
 
     def place(self):
+        """Прив'язка правого нижнього кута вікна до кута екрана."""
         scr = QGuiApplication.primaryScreen().geometry()
         right, bottom = self.margins
-        self.adjustSize()
-        g = QRect(scr.right() - self.width() - right, scr.bottom() - self.height() - bottom,
-                  self.width(), self.height())
-        self.setGeometry(g)
+        x = scr.right() - self.width() - right
+        y = scr.bottom() - self.height() - bottom
+        if self.pos().x() != x or self.pos().y() != y:
+            self.move(x, y)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self.place()
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        self.place()
