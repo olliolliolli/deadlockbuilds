@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import hashlib
+import time
+from functools import partial
 from concurrent.futures import ThreadPoolExecutor
 import re
 import threading
@@ -18,7 +20,7 @@ from pathlib import Path
 import requests
 from PySide6.QtCore import QObject, QPoint, QSize, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QColor, QFont, QIcon, QImage, QPainter, QPainterPath, QPixmap
-from PySide6.QtWidgets import (QApplication, QComboBox, QFrame, QGridLayout, QHBoxLayout,
+from PySide6.QtWidgets import (QApplication, QComboBox, QFrame, QGraphicsOpacityEffect, QGridLayout, QHBoxLayout,
                                QLabel, QPushButton, QScrollArea, QSizeGrip, QVBoxLayout, QWidget)
 
 from . import config as cfgmod
@@ -27,6 +29,7 @@ from .api import Client, force_ipv4
 from .gamewatch import GameWatcher, game_running, launch_with_condebug, normalize_hero_key
 from . import winfocus
 from .hotkeys import HotkeyListener, pretty
+from .hud import Hud, next_items
 from .serverdata import ServerData, default_url
 
 try:
@@ -210,9 +213,13 @@ def _icon_box(size: int, slot: str | None = None) -> QLabel:
 
 
 class ItemRow(QFrame):
-    def __init__(self, r: ItemRec, icons: IconCache):
+    def __init__(self, r: ItemRec, icons: IconCache, bought: bool = False, on_toggle=None):
         super().__init__()
         self.setObjectName("row")
+        self.item_id = r.item_id
+        self.on_toggle = on_toggle
+        if on_toggle:
+            self.setCursor(Qt.PointingHandCursor)
         lay = QHBoxLayout(self)
         lay.setContentsMargins(4, 3, 6, 3)
         lay.setSpacing(9)
@@ -223,7 +230,8 @@ class ItemRow(QFrame):
 
         mid = QVBoxLayout()
         mid.setSpacing(0)
-        mid.addWidget(_label(r.name, "itemName"))
+        self.name_lbl = _label(r.name, "itemName")
+        mid.addWidget(self.name_lbl)
         when = f"~{r.buy_min:.0f} хв · " if r.buy_min is not None else ""
         mid.addWidget(_label(f"{when}{r.cost} душ · пік {r.pickrate * 100:.0f}%", "muted"))
         lay.addLayout(mid, 1)
@@ -244,7 +252,28 @@ class ItemRow(QFrame):
         self.setToolTip(
             f"<b>{r.name}</b><br>{SLOT_NAMES.get(r.slot, r.slot)} · тір {r.tier} · {r.cost} душ<br>"
             f"Вінрейт {r.winrate * 100:.1f}% ({r.matches:,} матчів)<br>"
-            f"Відносно інших предметів тіру: {r.delta * 100:+.1f} п.п.".replace(",", " "))
+            f"Відносно інших предметів тіру: {r.delta * 100:+.1f} п.п.<br>"
+            f"<i>Клік — позначити купленим</i>".replace(",", " "))
+        self.set_bought(bought)
+
+    def set_bought(self, on: bool):
+        self.bought = on
+        self.setGraphicsEffect(None)
+        if on:
+            eff = QGraphicsOpacityEffect(self)
+            eff.setOpacity(0.38)
+            self.setGraphicsEffect(eff)
+        f = self.name_lbl.font()
+        f.setStrikeOut(on)
+        self.name_lbl.setFont(f)
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton and self.on_toggle:
+            self.set_bought(not self.bought)
+            self.on_toggle(self.item_id, self.bought)
+            e.accept()
+            return
+        super().mousePressEvent(e)
 
 
 class Section(QWidget):
@@ -272,8 +301,14 @@ class Overlay(QWidget):
         self.an, self.cfg = analyzer, cfg
         self.offline = offline
         self.server = server if server and server.enabled else None
+        self.bought: set[int] = set()
+        self.match_started: float | None = None
         self.disp = Dispatcher()
         self.icons = IconCache(cfgmod.app_dir() / "icons", self.disp)
+        self.hud = Hud(self.icons, tuple(cfg.get("hud_margins") or (24, 230)))
+        self.hud_timer = QTimer(self)
+        self.hud_timer.timeout.connect(self.update_hud)
+        self.hud_timer.start(15_000)
         self.clickthrough = False
         self._drag: QPoint | None = None
         self._req = 0
@@ -371,8 +406,8 @@ class Overlay(QWidget):
 
         # --- footer
         foot = QHBoxLayout()
-        self.footer = _label(f"{pretty(cfg['hotkey_toggle'])} — курсор / сховати · "
-                             f"{pretty(cfg['hotkey_clickthrough'])} — крізь клік", "muted")
+        self.footer = _label(f"{pretty(cfg['hotkey_toggle'])} — збірки/гра · "
+                             f"{pretty(cfg['hotkey_clickthrough'])} — підказка в куті", "muted")
         foot.addWidget(self.footer)
         foot.addStretch()
         foot.addWidget(QSizeGrip(self))
@@ -428,15 +463,16 @@ class Overlay(QWidget):
         - показаний, але активна гра → забрати курсор (оверлей стає активним);
         - показаний і активний → сховати й повернути курсор у гру."""
         hwnd = int(self.winId())
-        if self.isVisible() and (winfocus.foreground() == hwnd or self.clickthrough):
-            self.hide()
+        if self.isVisible() and winfocus.foreground() == hwnd:
+            self.hide()                    # назад у гру: лишається підказка в куті
             self._return_focus()
+            self.update_hud()
             return
         if not self.isVisible():
             self.show()
+        self.hud.hide()
         self.raise_()
-        if not self.clickthrough:
-            self._take_focus()
+        self._take_focus()
 
     def _take_focus(self):
         hwnd = int(self.winId())
@@ -454,7 +490,13 @@ class Overlay(QWidget):
 
     # ------------------------------------------------------------ game detection
     def on_game(self, status: str, hero_key):
+        if status == "match" and self._game_status != "match":
+            self.match_started = time.time()     # новий матч — скидаємо позначки
+            self.bought.clear()
+        elif status != "match":
+            self.match_started = None
         self._game_status, self._game_hero = status, hero_key
+        QTimer.singleShot(0, self.update_hud)
         hero_id = self._hero_id_for(hero_key)
         name = self.hero_box.itemText(self.hero_box.findData(hero_id)) if hero_id else None
         texts = {
@@ -502,14 +544,38 @@ class Overlay(QWidget):
             self.status_btn.hide()
 
     def toggle_clickthrough(self):
-        self.clickthrough = not self.clickthrough
-        self.setWindowFlag(Qt.WindowTransparentForInput, self.clickthrough)
-        self.setWindowOpacity(float(self.cfg["opacity"]) * (0.8 if self.clickthrough else 1))
-        self.show()
-        if self.clickthrough:
-            self._return_focus()          # миша знову в грі
-        else:
-            self._take_focus()
+        """Ctrl+Shift+X — увімкнути/вимкнути підказку в правому нижньому куті."""
+        self.cfg["hud_enabled"] = not self.cfg.get("hud_enabled", True)
+        cfgmod.save(self.cfg)
+        self.update_hud()
+
+    # ------------------------------------------------------------ HUD
+    def _elapsed_min(self) -> float | None:
+        if self._game_status == "match" and self.match_started:
+            return (time.time() - self.match_started) / 60
+        return None
+
+    def update_hud(self):
+        show = (self.cfg.get("hud_enabled", True) and not self.isVisible()
+                and self.build_data is not None
+                and self._game_status not in (None, "not_running", "no_game_dir"))
+        if not show:
+            self.hud.hide()
+            return
+        items, how = next_items(self.build_data, self.bought, self._elapsed_min())
+        self.hud.update_items(self.build_data.hero_name, items, how)
+        self.hud.show()
+
+    def _toggle_bought(self, item_id: int, on: bool):
+        (self.bought.add if on else self.bought.discard)(item_id)
+        self.update_hud()
+
+    def _copy_id(self, bid, button, *_ignored):
+        QApplication.clipboard().setText(str(int(bid)))
+        if button is not None and isValid(button):
+            old = button.text()
+            button.setText("✓ Скопійовано — встав у пошук збірок у грі")
+            QTimer.singleShot(2500, lambda: isValid(button) and button.setText(old))
 
     # ------------------------------------------------------------ data
     def _run(self, fn, ok, *args, quiet: bool = False):
@@ -560,6 +626,8 @@ class Overlay(QWidget):
         if hero_id is None:
             return
         badge = RANKS[self.rank_box.currentIndex()][1]
+        if self.cfg.get("hero_id") != hero_id:
+            self.bought.clear()
         self.cfg["hero_id"] = hero_id
         self.cfg["rank_index"] = self.rank_box.currentIndex()
         cfgmod.save(self.cfg)
@@ -636,12 +704,12 @@ class Overlay(QWidget):
                 continue
             sec = Section(title, f"{sum(r.cost for r in lst):,} душ".replace(",", " "))
             for r in lst:
-                sec.lay.addWidget(ItemRow(r, self.icons))
+                sec.lay.addWidget(ItemRow(r, self.icons, r.item_id in self.bought, self._toggle_bought))
             self._add(sec)
         if b.situational:
             sec = Section("Ситуативні / альтернативи")
             for r in b.situational:
-                sec.lay.addWidget(ItemRow(r, self.icons))
+                sec.lay.addWidget(ItemRow(r, self.icons, r.item_id in self.bought, self._toggle_bought))
             self._add(sec)
         if b.ability_priority:
             self._add(self._abilities(b))
@@ -652,6 +720,7 @@ class Overlay(QWidget):
         legend.setStyleSheet("color:#6f685f; font-size:10px; margin-top:6px;")
         self._add(legend)
         QTimer.singleShot(0, lambda: bar.setValue(pos))
+        self.update_hud()
 
     def _abilities(self, b: Build) -> QWidget:
         wr = f"WR {b.ability_wr * 100:.1f}%" if b.ability_wr else ""
@@ -730,13 +799,8 @@ class Overlay(QWidget):
         btn.setObjectName("primary")
         btn.setCursor(Qt.PointingHandCursor)
 
-        # clicked передає bool «checked» першим аргументом — тому він окремо.
-        def copy(_checked=False, bid=best["id"], button=btn):
-            QApplication.clipboard().setText(str(bid))
-            button.setText("✓ Скопійовано — встав у пошук збірок у грі")
-            QTimer.singleShot(2500, lambda: isValid(button) and button.setText(f"Копіювати ID збірки  {bid}"))
-
-        btn.clicked.connect(copy)
+        # partial: clicked додає свій bool «checked» лише в кінець (*_ignored).
+        btn.clicked.connect(partial(self._copy_id, int(best["id"]), btn))
         lay.addWidget(btn)
         how = _label("У грі: магазин → «Збірки» (Builds) → пошук → Ctrl+V → обрати збірку.",
                      "muted", wrap=True)
@@ -749,7 +813,7 @@ class Overlay(QWidget):
                 a = QPushButton(f"{p['match'] * 100:.0f}% · {p['id']}")
                 a.setObjectName("ghost")
                 a.setToolTip(f"{p['name']} · ★ {p['favorites']}")
-                a.clicked.connect(lambda _c=False, bid=p["id"]: QApplication.clipboard().setText(str(bid)))
+                a.clicked.connect(partial(self._copy_id, int(p["id"]), a))
                 alt.addWidget(a)
             alt.addStretch()
             lay.addLayout(alt)
@@ -819,4 +883,5 @@ def main():
     watcher = GameWatcher(bridge.game.emit, cfg.get("game_dir") or None)
     watcher.start()
     w.show()
+    app.aboutToQuit.connect(w.hud.close)
     sys.exit(app.exec())
