@@ -651,7 +651,7 @@ class Overlay(QWidget):
         if hero_id is None:
             return
         badge = RANKS[self.rank_box.currentIndex()][1]
-        style = (self.cfg.get("styles") or {}).get(str(hero_id), "")
+        style = (self.cfg.get("styles") or {}).get(str(hero_id), "damage")   # типово — дамаг
         if self.cfg.get("hero_id") != hero_id:
             self.bought.clear()
         self.cfg["hero_id"] = hero_id
@@ -723,9 +723,10 @@ class Overlay(QWidget):
         self.style_box.blockSignals(True)
         self.style_box.clear()
         if b.styles:
-            for key in [""] + list(b.styles):
+            for key in [k for k in ("damage", "support", "") if k in b.styles or k == ""]:
                 self.style_box.addItem(STYLE_NAMES.get(key, key), key)
             self.style_box.setCurrentIndex(max(0, self.style_box.findData(b.style or "")))
+            self.style_box.setEnabled(True)
             self.style_box.show()
         else:
             self.style_box.hide()
