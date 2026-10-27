@@ -9,6 +9,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: build-exe
+  cancel-in-progress: true
+
 jobs:
   exe:
     runs-on: windows-latest
@@ -38,7 +42,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release delete latest --yes --cleanup-tag || true
-          gh release create latest dist/DeadlockBuilds.exe \
-            --title "DeadlockBuilds" \
-            --notes "Автоматична збірка від $(date -u +%Y-%m-%d). Завантаж DeadlockBuilds.exe нижче."
+          NOTES="Автоматична збірка від $(date -u +%Y-%m-%d) (${GITHUB_SHA::7}). Завантаж DeadlockBuilds.exe нижче."
+          if gh release view latest >/dev/null 2>&1; then
+            gh release upload latest dist/DeadlockBuilds.exe --clobber
+            gh release edit latest --notes "$NOTES"
+          else
+            gh release create latest dist/DeadlockBuilds.exe --title "DeadlockBuilds" --notes "$NOTES"
+          fi

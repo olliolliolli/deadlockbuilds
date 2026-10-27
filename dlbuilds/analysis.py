@@ -423,11 +423,16 @@ def match_ingame_builds(b: Build, entries, top: int = 3) -> list[dict]:
         core_got = sum(1 for iid, w in want.items() if w == 1.0 and iid in p["items"])
         p["match"] = got / total
         p["core_got"], p["core_total"] = core_got, core_total
+        # Популярність важлива: перевірені збірки з тисячами «улюблених»
+        # кращі за випадкову свіжу збірку з тим самим набором предметів.
         p["score"] = (p["match"] - 0.004 * max(0, len(p["items"]) - 30)
-                      + 0.02 * math.log10(1 + p["favorites"])
-                      - (0.08 if p["outdated"] else 0))
-        if p["match"] >= 0.3:
+                      + 0.07 * math.log10(1 + p["favorites"])
+                      - (0.06 if p["outdated"] else 0))
+        if p["match"] >= 0.35:
             out.append(p)
+    popular = [p for p in out if p["favorites"] >= 5]
+    if len(popular) >= top:
+        out = popular
     out.sort(key=lambda p: p["score"], reverse=True)
     for p in out:
         p.pop("items", None)
